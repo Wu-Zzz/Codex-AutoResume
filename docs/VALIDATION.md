@@ -4,7 +4,9 @@ Initial development baseline: 2026-10-20, Asia/Taipei.
 
 ## What this alpha can claim
 
-The live integration is an observation client. It can inspect available local histories and account quota information through the official Codex App Server. Automatic continuation remains blocked for externally owned chats until ownership, configuration preservation, and an atomic or serialized input path are proven. See [the protocol audit](protocol-audit.md).
+The live integration is an observation client. It can inspect available local histories through the official Codex App Server. It calls the quota endpoint but only checks whether the call failed: returned buckets/reset timestamps are not parsed into the production scheduler. The successful probe below establishes endpoint connectivity and response shape, not a completed live quota feature.
+
+The runtime passes empty quota buckets, unknown ownership, and unpreserved configuration into its safety gate. Production code does not claim or submit continuation intents; resume/start methods are excluded from the transport allowlist, and execution notifications are not consumed. Those implementation gaps exist in addition to the external-chat ownership/configuration limitations in [the protocol audit](protocol-audit.md). An application-owned execution path is a possible architecture, not an implemented capability.
 
 Tests of the scheduler prove deterministic decisions against fixtures; they do not prove that a real Desktop chat has safely resumed. A successful build proves compilation, not installation, signing, or a real quota-recovery cycle.
 
@@ -70,7 +72,20 @@ The workflow does not install Codex, access an account, issue inference, publish
 | macos-latest | 11 frontend/probe tests, 27 Rust tests, formatting, Clippy, frontend build and release desktop compilation all passed |
 | windows-latest | 11 frontend/probe tests, 27 Rust tests, formatting, Clippy, frontend build and release desktop compilation all passed |
 
-This establishes cloud compilation and automated checks on both operating systems. It does not establish Windows GUI behavior, installation, signing, account discovery on a fresh machine, or safe real-account continuation. This documentation-only update does not alter the tested implementation.
+This establishes cloud compilation and automated checks on both operating systems for the identified commit. It does not establish Windows GUI behavior, installation, signing, account discovery on a fresh machine, or safe real-account continuation. Later revisions need their own checks.
+
+### Native minimal UI revision and capability correction
+
+On 2026-10-20, the interface was simplified to one toolbar, a flat task list, and explicit monitoring switches. The runtime's user-facing messages and documentation now distinguish the implemented observation client from the unimplemented continuation path. Demo fixtures no longer imply a working live quota countdown.
+
+- Local type checking, frontend production build and 11 frontend/probe tests passed.
+- Rust formatting, 27 tests and Clippy passed after the runtime/scheduler copy changes.
+- Browser interaction checks passed for adding, searching, rejecting a hidden selection, default-off monitoring, toggling, pausing/restoring, task details, removal and both information dialogs. These use isolated demo data.
+- 760 × 580 and 560 × 580 browser views were visually checked; the narrower view had no horizontal overflow. Visible text is at least 12 px, with text contrast checked against its background.
+- The updated macOS ARM64 debug `.app` bundle compiled successfully. This revision was not newly validated on a real Windows machine or through a real quota interruption/recovery cycle.
+- [Three Figma views](DESIGN.md) were rendered and inspected. Their final structures contain editable text, vectors and component instances, with no image-filled UI layers. Prototype page connections were added; they do not implement application execution.
+
+The prior successful dual-platform CI run above belongs to the earlier commit. The new push triggers an independent run; consult GitHub Actions for its current result. No GitHub Release or installer is published by this revision.
 
 Local commands are:
 

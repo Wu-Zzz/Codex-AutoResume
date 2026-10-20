@@ -104,28 +104,28 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="application">
-    <div v-if="demo" class="preview-bar"><span>界面预览 · 示例数据</span><a href="/">退出预览 <span aria-hidden="true">↗</span></a></div>
+    <div v-if="demo" class="preview-bar"><span>AutoResume <span class="preview-divider" aria-hidden="true">/</span> 示例数据</span><a href="/">退出预览 <span aria-hidden="true">↗</span></a></div>
     <header class="app-header">
-      <div class="brand">
-        <div class="brand-symbol" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M24.8 14a9 9 0 1 0-1.9 7.8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="m20 10 5 4 2-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="m13.5 12 6 4-6 4v-8Z" fill="currentColor"/></svg></div>
-        <h1>Codex <strong>AutoResume</strong></h1>
+      <div class="section-title">
+        <h1 id="tasks-title">{{ desktop || demo ? '任务' : 'AutoResume' }}</h1>
+        <span v-if="snapshot.tasks.length" class="count" :aria-label="`${snapshot.tasks.length} 个任务`">{{ snapshot.tasks.length }}</span>
       </div>
-      <button class="connection-button" :class="snapshot.connection" aria-label="查看连接状态" @click="connectionDialog?.showModal()"><i aria-hidden="true" />{{ connectionLabel }}<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="header-actions">
+        <button class="connection-button" :class="snapshot.connection" aria-label="查看连接状态" @click="connectionDialog?.showModal()"><i aria-hidden="true" /><span>{{ connectionLabel }}</span><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span class="toolbar-divider" aria-hidden="true" />
+        <button v-if="snapshot.tasks.length" class="button secondary pause-button" :aria-label="snapshot.pausedAll ? '恢复监测' : '暂停全部'" :title="snapshot.pausedAll ? '恢复监测' : '暂停全部'" :disabled="busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path v-if="snapshot.pausedAll" d="m6 3 6 5-6 5V3Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path v-else d="M5.5 4v8M10.5 4v8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
+        <button class="button primary add-button" :disabled="!connected || loading" @click="openCandidates"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>添加任务</button>
+      </div>
     </header>
 
     <main>
       <div v-if="error" class="error-notice" role="alert"><p>{{ error }}</p><button class="icon-button" aria-label="关闭错误提示" @click="error = ''">×</button></div>
 
       <section class="tasks-section" aria-labelledby="tasks-title">
-        <div class="section-heading">
-          <div class="section-title"><h2 id="tasks-title">任务</h2><span class="count">{{ snapshot.tasks.length }}</span></div>
-          <div class="task-actions">
-            <button v-if="snapshot.tasks.length" class="button secondary pause-button" :disabled="busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path v-if="snapshot.pausedAll" d="m6 3 6 5-6 5V3Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path v-else d="M5 3v10M11 3v10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>{{ snapshot.pausedAll ? '恢复监测' : '暂停全部' }}</button>
-            <button class="button primary add-button" :disabled="!connected || loading" @click="openCandidates"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>添加任务</button>
-          </div>
+        <div class="list-toolbar">
+          <button id="capability-status" class="capability-status" @click="capabilityDialog?.showModal()"><span>仅监测<span class="capability-separator">·</span>自动续跑尚未开放</span><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke="currentColor" stroke-width="1.2"/><path d="M8 7v4M8 4.8v.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+          <span v-if="snapshot.tasks.length" class="monitor-label" aria-hidden="true">监测</span>
         </div>
-
-        <button id="capability-status" class="capability-status" @click="capabilityDialog?.showModal()"><span class="capability-copy"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke="currentColor" stroke-width="1.2"/><path d="M8 7v4M8 4.8v.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>仅监测<span class="capability-separator">·</span>自动续跑尚未开放</span></span><svg class="chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div v-if="snapshot.pausedAll" class="paused-banner" role="status">已暂停监测</div>
 
         <div v-if="loading" class="empty-state" aria-live="polite"><span class="spinner" aria-hidden="true"/><h3>正在连接 Codex…</h3></div>
@@ -135,7 +135,6 @@ onBeforeUnmount(() => {
           <p>{{ connected ? '添加一个本地 Codex 任务' : '请先连接本机 Codex' }}</p>
         </div>
         <div v-else class="task-list">
-          <div class="list-labels" aria-hidden="true"><span>任务 / 项目</span><span>状态</span><span>自动续跑</span></div>
           <article v-for="task in snapshot.tasks" :key="task.id" class="task-item" :class="{ expanded: expanded.has(task.id) }">
             <div class="task-row">
               <button class="task-summary" :aria-expanded="expanded.has(task.id)" :aria-controls="`details-${task.id}`" @click="toggleDetails(task.id)">
@@ -143,7 +142,7 @@ onBeforeUnmount(() => {
                 <span class="task-name"><strong :title="task.title">{{ task.title || '未命名任务' }}</strong><span :title="task.cwd">{{ projectName(task.cwd) }}</span></span>
               </button>
               <div class="task-status"><span class="status-label" :class="task.state"><i aria-hidden="true"/>{{ stateLabel(task.state) }}</span><span v-if="task.resetsAt !== null" class="reset-time">{{ formatTime(task.resetsAt, true) }} 后核对</span></div>
-              <div class="toggle-cell"><button class="switch" :class="{ on: task.enabled }" role="switch" :aria-checked="task.enabled" :aria-label="`${task.title}自动续跑偏好`" aria-describedby="capability-status" :title="task.enabled ? '已保存开启偏好；当前仅监测' : '自动续跑偏好已关闭'" :disabled="busy.has(task.id)" @click="mutate('set_task_enabled', { threadId: task.id, enabled: !task.enabled }, task.id)"><span/></button></div>
+              <div class="toggle-cell"><button class="switch" :class="{ on: task.enabled }" role="switch" :aria-checked="task.enabled" :aria-label="`${task.title}监测`" aria-describedby="capability-status" :title="task.enabled ? '关闭任务监测' : '开启任务监测'" :disabled="busy.has(task.id)" @click="mutate('set_task_enabled', { threadId: task.id, enabled: !task.enabled }, task.id)"><span/></button></div>
             </div>
             <div v-if="expanded.has(task.id)" :id="`details-${task.id}`" class="task-details">
               <p class="task-detail-message">{{ task.detail }}</p>
@@ -173,7 +172,7 @@ onBeforeUnmount(() => {
 
     <dialog ref="capabilityDialog" class="dialog capability-dialog" aria-labelledby="capability-title">
       <div class="dialog-header"><h2 id="capability-title">当前仅支持监测</h2><button class="icon-button" aria-label="关闭能力说明" autofocus @click="capabilityDialog?.close()">×</button></div>
-      <p class="dialog-description">自动续跑开关仅保存偏好，当前版本不会启动或恢复任务。</p>
+      <p class="dialog-description">开关控制本工具的任务监测。自动续跑尚未实现，当前版本不会启动或恢复 Codex 任务。</p>
       <p v-if="snapshot.compatibilityMessage" class="capability-reason">{{ snapshot.compatibilityMessage }}</p>
       <p v-else class="capability-reason">安全接管原会话的能力尚未验证。请在 Codex 中继续任务。</p>
     </dialog>

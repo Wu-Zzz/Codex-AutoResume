@@ -9,6 +9,7 @@
 - Only explicit terminal usageLimitExceeded permits automatic continuation. Do not classify errors by natural-language matching.
 - Persist intent before sending turn/start. An uncertain send must not be retried without reconciliation. Protect against concurrent app instances.
 - Approval/user-input requests need the user. Never auto-approve or silently loosen permissions. Preserve all execution configuration or refuse automatic recovery.
+- In the observation prototype, the enabled flag only selects monitoring. Never migrate existing monitoring selections into consent for automatic execution; require a separate explicit opt-in before a future executing adapter is enabled.
 - Real account checks are read-only unless the user explicitly authorizes a concrete live execution test. Do not resume or interrupt unrelated user chats during development.
 - Add meaningful tests for scheduler transitions, rate-limit gates, persistence/restart and transport failures. Do not add cosmetic tests.
 - Validate with npm run check, npm run build, cargo fmt --check, cargo test and cargo clippy where supported. Report unavailable platform checks honestly.

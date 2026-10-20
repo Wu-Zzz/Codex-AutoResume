@@ -82,7 +82,7 @@ impl TaskRecord {
             cwd,
             enabled: false,
             state: TaskState::Paused,
-            detail: "自动续跑已关闭".into(),
+            detail: "监测已关闭".into(),
             resets_at: None,
             events: Vec::new(),
             failed_turn_id: None,
@@ -136,7 +136,7 @@ pub fn set_enabled(task: &mut TaskRecord, enabled: bool, now: i64) {
         task.needs_reconciliation = true;
         task.set_status(TaskState::Reconciling, "正在核对会话状态", now);
     } else {
-        task.set_status(TaskState::Paused, "自动续跑已关闭", now);
+        task.set_status(TaskState::Paused, "监测已关闭", now);
     }
 }
 
@@ -177,7 +177,7 @@ pub fn observe_turn(task: &mut TaskRecord, turn: &TurnObservation, now: i64) {
         TurnStatus::Interrupted => {
             // Manual stop revokes automatic continuation until the user enables it again.
             task.enabled = false;
-            task.set_status(TaskState::Paused, "任务已停止，自动续跑已关闭", now);
+            task.set_status(TaskState::Paused, "任务已停止，监测已关闭", now);
         }
         TurnStatus::Failed if task.enabled => {
             task.set_status(
@@ -193,7 +193,7 @@ pub fn observe_turn(task: &mut TaskRecord, turn: &TurnObservation, now: i64) {
         _ => {}
     }
     if !task.enabled && task.state != TaskState::Paused {
-        task.set_status(TaskState::Paused, "自动续跑已关闭", now);
+        task.set_status(TaskState::Paused, "监测已关闭", now);
     }
 }
 

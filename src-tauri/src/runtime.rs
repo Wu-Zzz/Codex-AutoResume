@@ -15,9 +15,8 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str =
-    "开发预览：可查看本地任务；跨客户端安全接管尚未验证，当前不会自动发送继续。";
-const TAKEOVER_BLOCKED: &str = "尚不能确认原客户端已停止并保留原权限，自动续跑未启动";
+pub const COMPATIBILITY: &str = "当前仅支持监测。真实额度调度、会话恢复和执行提交尚未实现。";
+const TAKEOVER_BLOCKED: &str = "已开启监测，尚不能确认原客户端的实时执行状态；自动续跑尚未实现";
 
 pub fn now() -> i64 {
     SystemTime::now()
