@@ -1,0 +1,155 @@
+name: Package desktop prerelease
+
+on:
+  push:
+    tags: ["v*-alpha.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref_type == 'tag'
+    name: Package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+            bundle: dmg
+            extension: dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            bundle: dmg
+            extension: dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+            bundle: nsis
+            extension: exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      BUILD_TARGET: ${{ matrix.target }}
+      BUILD_PLATFORM: ${{ matrix.platform }}
+      BUNDLE_FORMAT: ${{ matrix.bundle }}
+      INSTALLER_EXTENSION: ${{ matrix.extension }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Require a matching alpha tag and release notes
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, accessSync } from 'node:fs';
+          const tag = process.env.RELEASE_TAG;
+          if (!/^v\d+\.\d+\.\d+-alpha\.\d+$/.test(tag)) throw new Error('Select an alpha release tag');
+          const version = tag.slice(1);
+          for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+            if (JSON.parse(readFileSync(file)).version !== version) throw new Error(`Version mismatch: ${file}`);
+          }
+          const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8');
+          if (cargo.match(/^version = "([^"]+)"/m)?.[1] !== version) throw new Error('Cargo version mismatch');
+          accessSync(`docs/releases/${tag}.md`);
+          JS
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Build installer
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        run: npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUNDLE_FORMAT" -- --locked
+      - name: Verify Mac image and ad-hoc signature
+        if: runner.os == 'macOS'
+        run: |
+          hdiutil verify src-tauri/target/"$BUILD_TARGET"/release/bundle/dmg/*.dmg
+          codesign --verify --deep --strict "src-tauri/target/$BUILD_TARGET/release/bundle/macos/Codex AutoResume.app"
+          file "src-tauri/target/$BUILD_TARGET/release/bundle/macos/Codex AutoResume.app/Contents/MacOS/codex-autoresume"
+      - name: Smoke test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem "src-tauri/target/$env:BUILD_TARGET/release/bundle/nsis/*.exe")
+          if ($installer.Count -ne 1) { throw "Expected one NSIS installer" }
+          $installDir = Join-Path $env:RUNNER_TEMP 'autoresume-install-check'
+          $result = Start-Process $installer[0].FullName -ArgumentList '/S', "/D=$installDir" -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Installer failed: $($result.ExitCode)" }
+          if (!(Test-Path (Join-Path $installDir 'codex-autoresume.exe'))) { throw "Installed executable missing" }
+      - name: Collect named installer
+        run: |
+          node --input-type=module <<'JS'
+          import { readdirSync, mkdirSync, copyFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const { BUILD_TARGET, BUILD_PLATFORM, BUNDLE_FORMAT, INSTALLER_EXTENSION, RELEASE_TAG } = process.env;
+          const dir = `src-tauri/target/${BUILD_TARGET}/release/bundle/${BUNDLE_FORMAT}`;
+          const files = readdirSync(dir).filter(name => name.endsWith(`.${INSTALLER_EXTENSION}`));
+          if (files.length !== 1) throw new Error(`Expected one installer, got ${files.length}`);
+          mkdirSync('work/release-assets', { recursive: true });
+          copyFileSync(join(dir, files[0]), `work/release-assets/Codex-AutoResume-${RELEASE_TAG}-${BUILD_PLATFORM}.${INSTALLER_EXTENSION}`);
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: work/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified prerelease
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: installer-*
+          path: work/release-assets
+          merge-multiple: true
+      - name: Check complete asset set and create checksums
+        shell: bash
+        run: |
+          cd work/release-assets
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          test -s "Codex-AutoResume-${RELEASE_TAG}-macos-arm64.dmg"
+          test -s "Codex-AutoResume-${RELEASE_TAG}-macos-x64.dmg"
+          test -s "Codex-AutoResume-${RELEASE_TAG}-windows-x64.exe"
+          sha256sum *.dmg *.exe > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Publish only after all installers pass
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" work/release-assets/* \
+            --verify-tag --draft --prerelease \
+            --title "Codex AutoResume ${RELEASE_TAG} · 监测预览版" \
+            --notes-file "docs/releases/${RELEASE_TAG}.md"
+          test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false

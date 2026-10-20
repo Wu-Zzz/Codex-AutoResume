@@ -102,7 +102,21 @@ npm run tauri -- build --no-bundle
 
 The live probe is intentionally separate from these commands. Run it only when an account read is authorized; it must keep its method allowlist read-only.
 
-## Checks still needed before distribution
+### Dark UI and installer prerelease
+
+The `v0.1.0-alpha.1` revision implements the accepted dark Figma direction in Vue, with a 960 × 640 main window and a separate 380 × 560 tray window. The native tray and main window share the same Rust state. No continuation protocol methods were enabled.
+
+- Frontend type checking, production build and all 11 frontend/path tests passed locally.
+- All 30 Rust tests, formatting and Clippy passed locally. Three new tests cover tray placement below a Retina menu bar, above the Windows taskbar and on a secondary display with a negative origin.
+- Browser checks passed for monitor toggles, global pause/restore, task filtering and selection, search, hidden candidate actions, adding a task with monitoring off, removal, connection/capability dialogs, Escape/focus return and tray-to-detail navigation.
+- The 960 × 640 main view and 380 × 560 tray view were inspected visually. No horizontal overflow, missing SVG assets, visible text below 12 px, or JavaScript runtime errors were found in these checks.
+- The logo arrow was corrected in one canonical SVG and used to regenerate the macOS and Windows icons. Public screenshots contain isolated demo data.
+
+The [installer workflow](../.github/workflows/release.yml) runs the required checks before producing two Mac DMGs and a Windows x64 NSIS installer. It verifies Mac image integrity/ad-hoc signatures and performs a Windows silent-install smoke check in a disposable runner. Only after all three jobs pass does it publish the prerelease with a complete installer set and SHA-256 checksums. The actual result is visible in [release workflow runs](https://github.com/Wu-Zzz/Codex-AutoResume/actions/workflows/release.yml).
+
+This is an unsigned/unnotarized developer-identity preview, not a verified automatic-continuation product. Ad-hoc Mac signing is not Developer ID signing or notarization. Cloud installation smoke checks do not establish Windows GUI or fresh-machine account/login behavior.
+
+## Checks still needed for general availability
 
 - Test installation and GUI behavior on Windows; the Mac and Windows cloud build results are recorded above.
 - Complete tray-menu interaction, forced concurrent-instance handling, and Windows lifecycle checks; basic macOS opening, close/reopen, and explicit quit were exercised above.
@@ -110,4 +124,4 @@ The live probe is intentionally separate from these commands. Run it only when a
 - Verify that logs, storage, UI errors, and diagnostic exports contain no credentials or unintended conversation content.
 - Prove ownership and configuration preservation before enabling any automated turn submission; the current external-chat path is intentionally blocked.
 - Test real quota exhaustion and recovery on a disposable, explicitly authorized task, including lost response and simultaneous manual-input cases.
-- Add packaging, signing, notarization, and installer validation when preparing an actual release.
+- Obtain developer code-signing credentials, notarize the Mac build, and complete fresh-machine installation and lifecycle validation.

@@ -8,7 +8,7 @@
 
 ![任务列表界面，使用隔离的示例数据](docs/images/app-preview.png)
 
-[Figma 可编辑设计](https://www.figma.com/design/jQ2j1oO7iyMbQOpZIoEgpd?node-id=4-223)包含主窗口、添加任务和空状态。采用 macOS 原生极简方向；设计中的任务与连接状态均为示例。
+[Figma 可编辑设计](https://www.figma.com/design/jQ2j1oO7iyMbQOpZIoEgpd?node-id=10-94)包含托盘小窗、任务详情、添加任务和连接引导。应用采用新版深色界面；设计中的未来续跑状态与未实现功能不作为本版能力展示。
 
 ## 当前功能
 
@@ -22,9 +22,9 @@
 
 ## 下载与 Release
 
-截至 2026-10-20，GitHub 尚无 Release。现有本地开发产物是 macOS `.app` 的 ZIP，不是正式安装包。GitHub Actions 目前使用 `--no-bundle`，只做编译验证。
+安装包见 [GitHub Releases](https://github.com/Wu-Zzz/Codex-AutoResume/releases)。首版为 `v0.1.0-alpha.1` **监测预览版**：macOS 提供 Apple Silicon 与 Intel 的 `.dmg`，Windows 提供 x64 `.exe`（NSIS）。请选择对应设备的安装包，Source code ZIP 是源码。
 
-后续分发格式计划为 macOS `.dmg` 和 Windows `.exe`（NSIS）。当前没有 `.pkg` 发布方案；安装包、签名、公证、安装验证和发布流程尚未完成。
+macOS 仅有 ad-hoc 签名，没有 Developer ID 签名及公证；Windows 没有代码签名，首次打开可能收到系统拦截或未知发布者提示。Windows 缺少 WebView2 时安装需要联网。应用不包含 Codex CLI，需要先安装官方 Codex 并登录。详见[版本说明](docs/releases/v0.1.0-alpha.1.md)。
 
 ## 运行开发版本
 
@@ -59,7 +59,7 @@ npm run tauri build
 
 `probe-codex.mjs` 只调用握手、账号读取、会话列表、会话读取和额度读取，只输出数量和成功标记，不打印账号身份或聊天内容。它不会恢复、启动、停止或修改任务。
 
-macOS / Windows 的构建结果见 [GitHub Actions](https://github.com/Wu-Zzz/codex-autoresume/actions/workflows/ci.yml)。签名、公证、一键安装 Codex、通知、自启动与保持唤醒尚未实现。云端构建、Windows 实机与真实跨额度窗口验证分别记录在 [验证记录](docs/VALIDATION.md)。
+macOS / Windows 的构建结果见 [GitHub Actions](https://github.com/Wu-Zzz/codex-autoresume/actions/workflows/ci.yml)，安装包构建见[发布流程](https://github.com/Wu-Zzz/Codex-AutoResume/actions/workflows/release.yml)。开发者签名、公证、一键安装 Codex、通知、自启动与保持唤醒尚未实现。云端构建、Windows 实机与真实跨额度窗口验证分别记录在 [验证记录](docs/VALIDATION.md)。
 
 ## 实现边界
 

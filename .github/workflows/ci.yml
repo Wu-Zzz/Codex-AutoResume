@@ -2,6 +2,7 @@ name: Validate desktop alpha
 
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:
