@@ -17,8 +17,7 @@ The managed actor implements quota-trigger handling, strict quota gates,
 history/idle rechecks, an atomic persisted intent before dispatch, response
 reconciliation and refusal to replay uncertain submissions. It retains the warm
 execution context and does not automatically cold-resume after restart or take
-over unrelated sessions. Final review and packaged native checks are still in
-progress; these implementation statements are not a live acceptance result.
+over unrelated sessions. Independent source review and local macOS packaging checks passed. These implementation statements are not real model-inference or quota-recovery acceptance.
 
 | Current-revision check | Status and scope |
 | --- | --- |
@@ -28,9 +27,9 @@ progress; these implementation statements are not a live acceptance result.
 | Strict quota parser and separate display telemetry | Targeted parser/scheduler checks passed; display unknowns remain unknown and cannot authorize execution |
 | Integrated Rust tests | 80 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
 | Rust formatting and Clippy | Passed; Clippy covered all targets with warnings denied |
-| New native application build and packaged-app checks | Pending; no current native-build success is claimed yet |
-| Current macOS/Windows CI and installer verification | Pending final revision; historical CI below must not be reused as current evidence |
-| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Implemented; current CI and real-machine GUI verification still required |
+| New macOS ARM64 application and DMG | Built: app 14.57 MiB, DMG 4.62 MiB; strict ad-hoc signature and disk-image integrity checks passed |
+| Current macOS/Windows CI | [Run 39404011614](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39404011614), commit `a60bfd958f5b01bdb66047647a396281fc439312`, both macOS and Windows passed all tests, static checks and release application compilation; not a published release |
+| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled and tested in current Windows CI; real-machine terminal/login GUI verification still required |
 | Real managed model inference | **Not performed** |
 | Real quota exhaustion and automatic recovery | **Not performed** |
 | Signing/notarization and fresh-machine acceptance | Not established for this revision |
@@ -38,9 +37,21 @@ progress; these implementation statements are not a live acceptance result.
 New fixture coverage includes user input arriving during a recovery check,
 approval/input interruption, changed or unknown configuration, multiple quota
 buckets, existing monitoring consent, failed login, and lost acknowledgements.
-Final adversarial review may still expose issues. The counts above are the
+Independent review found and resolved official TUI optional-field compatibility and non-sticky per-turn configuration issues. The counts above are the
 current local pass; any subsequent code correction requires the affected checks
 to be rerun. They are not proof of real quota recovery or package acceptance.
+
+### Current packaged Mac UI check
+
+The newly built native application launched successfully. Its existing local
+account connection and live quota display were read-only. Native light/dark
+switching updated both content and window appearance. The system folder picker
+returned the isolated test directory, and automatic continuation was unchecked
+by default. The new-task dialog was closed without opening a Codex terminal.
+No existing task was enabled, disabled, removed, resumed or interrupted by this
+check. Screenshots containing personal histories are not committed; public UI
+images use preview fixtures only. Actual tray-icon interaction and Windows GUI
+still need separate verification.
 
 ### Current live read-only connection and quota checks
 
