@@ -1,0 +1,16 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+work/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+test-results/
+playwright-report/
+.playwright-cli/
+src-tauri/gen/
