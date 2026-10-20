@@ -10,7 +10,7 @@ Tests of the scheduler prove deterministic decisions against fixtures; they do n
 
 ## Live read-only probe
 
-The implementation agent reported the following local macOS probe results against installed `codex-cli 0.145.0`:
+The local macOS probe returned the following results against installed `codex-cli 0.145.0`:
 
 | Check | Observed result |
 | --- | --- |
@@ -44,7 +44,7 @@ Local macOS ARM64 results (2026-10-20):
 | Redesigned browser UI interactions | Passed: toggle, pause/resume, details, search, hidden-selection guard, add default-off candidate, remove, connection/capability dialogs, Escape and focus restoration |
 | Narrow browser layout | 390 px viewport, no horizontal overflow |
 
-The redesigned utility window defaults to 760 × 580. Three sample tasks fit without clipping; the main view has one add button and one details entry per task. UI screenshots use isolated demo fixtures only. The Figma connection was unavailable during this revision; the interface was designed in Vue/CSS and inspected with Playwright. No Figma design file is claimed.
+The redesigned utility window defaults to 760 × 580. Three sample tasks fit without clipping; the main view has one add button and one details entry per task. UI screenshots use isolated demo fixtures only. The rebuilt macOS application was launched and its connection dialog and empty task view were checked against the local account; no real tasks were added or enabled.
 
 The probe-discovery tests simulate Windows filesystem layouts (PATH, APPDATA, explicit executable overrides and npm launchers) on either runner. They are not Windows installation or live-account tests.
 
@@ -59,7 +59,18 @@ The repository's [CI workflow](../.github/workflows/ci.yml) defines independent 
 3. Run Rust formatting checks, scheduler/persistence tests, and Clippy with warnings treated as errors.
 4. Compile the Tauri desktop application with `--no-bundle`.
 
-The workflow does not install Codex, access an account, issue inference, publish artifacts, create a release, sign, or notarize an application. Adding the workflow is not evidence that its remote jobs have run. Record actual run results before claiming CI success.
+The workflow does not install Codex, access an account, issue inference, publish artifacts, create a release, sign, or notarize an application.
+
+### Verified GitHub Actions run
+
+[Run 39366176954](https://github.com/Wu-Zzz/codex-autoresume/actions/runs/39366176954) completed successfully on 2026-10-20 for code commit `63c0658ce1b001765e533bf3bfd2028b000391c1`:
+
+| Runner | Result |
+| --- | --- |
+| macos-latest | 11 frontend/probe tests, 27 Rust tests, formatting, Clippy, frontend build and release desktop compilation all passed |
+| windows-latest | 11 frontend/probe tests, 27 Rust tests, formatting, Clippy, frontend build and release desktop compilation all passed |
+
+This establishes cloud compilation and automated checks on both operating systems. It does not establish Windows GUI behavior, installation, signing, account discovery on a fresh machine, or safe real-account continuation. This documentation-only update does not alter the tested implementation.
 
 Local commands are:
 
@@ -78,7 +89,7 @@ The live probe is intentionally separate from these commands. Run it only when a
 
 ## Checks still needed before distribution
 
-- Record actual Mac and Windows CI run results and test the application on each operating system.
+- Test installation and GUI behavior on Windows; the Mac and Windows cloud build results are recorded above.
 - Complete tray-menu interaction, forced concurrent-instance handling, and Windows lifecycle checks; basic macOS opening, close/reopen, and explicit quit were exercised above.
 - Test official Codex executable discovery and explicit login handoff on fresh Mac and Windows installations.
 - Verify that logs, storage, UI errors, and diagnostic exports contain no credentials or unintended conversation content.

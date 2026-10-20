@@ -49,7 +49,7 @@ npm run tauri build
 
 `probe-codex.mjs` 只调用握手、账号读取、会话列表、会话读取和额度读取，只输出数量和成功标记，不打印账号身份或聊天内容。它不会恢复、启动、停止或修改任务。
 
-macOS / Windows 的构建检查已配置在 GitHub Actions；本地写入工作流不代表云端已运行。签名、公证、一键安装 Codex、通知、自启动与保持唤醒尚未实现。Windows 实机与真实跨额度窗口验证单独记录在 [验证记录](docs/VALIDATION.md)。
+macOS / Windows 的构建结果见 [GitHub Actions](https://github.com/Wu-Zzz/codex-autoresume/actions/workflows/ci.yml)。签名、公证、一键安装 Codex、通知、自启动与保持唤醒尚未实现。云端构建、Windows 实机与真实跨额度窗口验证分别记录在 [验证记录](docs/VALIDATION.md)。
 
 ## 实现边界
 
