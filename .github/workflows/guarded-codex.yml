@@ -1,0 +1,25 @@
+name: Validate experimental Desktop backend
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "integrations/codex/**"
+      - "scripts/build-guarded-codex.mjs"
+      - ".github/workflows/guarded-codex.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  conditional-continuation:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Build pinned modified backend and run isolated tests
+        run: node scripts/build-guarded-codex.mjs --test

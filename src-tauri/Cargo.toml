@@ -4,6 +4,7 @@ version = "0.1.0-alpha.1"
 description = "A local Codex continuation companion"
 authors = ["Codex AutoResume contributors"]
 edition = "2021"
+default-run = "codex-autoresume"
 rust-version = "1.85"
 license = "MIT"
 

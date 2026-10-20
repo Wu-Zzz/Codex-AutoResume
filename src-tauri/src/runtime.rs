@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str = "已有 Desktop / CLI 会话仅监测。新任务可从本工具打开官方终端，并单独授权自动续跑；当前处于开发验证阶段。重启或终端断开后不会自动接管。";
+pub const COMPATIBILITY: &str = "普通连接仅监测。通过实验桌面连接打开的原聊天可单独开启原地续跑；需在该连接中观察到新的额度中断。终端托管模式也需单独授权。";
 const TAKEOVER_BLOCKED: &str = "仅监测已有会话；无法确认原客户端的独占执行权，不会自动续跑";
 
 pub fn now() -> i64 {
@@ -72,6 +72,7 @@ pub struct AppState {
     pub runtime: Mutex<Runtime>,
     pub snapshot: RwLock<Snapshot>,
     pub managed: crate::managed::ManagedHub,
+    pub desktop: crate::desktop_bridge::DesktopHub,
 }
 
 pub struct Runtime {
@@ -96,6 +97,9 @@ impl AppState {
             ..Snapshot::default()
         };
         Ok(Arc::new(Self {
+            desktop: crate::desktop_bridge::DesktopHub::new(
+                path.parent().ok_or("应用数据目录无效")?,
+            ),
             managed: crate::managed::ManagedHub::open(
                 path.parent().ok_or("应用数据目录无效")?,
                 path,
@@ -139,7 +143,7 @@ impl AppState {
         snapshot
             .tasks
             .extend(managed.into_iter().map(|task| TaskView {
-                mode: "managed",
+                mode: "managed".into(),
                 can_enable: task.can_enable,
                 id: task.id,
                 title: task.title,
@@ -150,6 +154,21 @@ impl AppState {
                 resets_at: task.resets_at,
                 events: task.events,
             }));
+        let (desktop, desktop_quota) = self.desktop.snapshot().await;
+        if !desktop.is_empty() {
+            snapshot.connection = "ready".into();
+            snapshot.connection_message = "原 Desktop 已连接 · 实验桥接".into();
+            snapshot.codex_version = None;
+            snapshot.account_label = None;
+            snapshot.quota = desktop_quota;
+            snapshot
+                .tasks
+                .retain(|task| !desktop.iter().any(|native| native.id == task.id));
+            snapshot.tasks.extend(desktop);
+            snapshot.compatibility_message = Some(
+                "已连接实验桌面桥接。开启所选原聊天后，仅对本次连接中确认的额度中断原地续跑。桌面重启后需重新开启。".into(),
+            );
+        }
         Ok(snapshot)
     }
 

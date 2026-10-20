@@ -1,3 +1,6 @@
+pub mod desktop_bridge;
+mod desktop_guard;
+pub mod desktop_launch;
 mod managed;
 mod protocol;
 mod quota;
@@ -44,6 +47,9 @@ async fn set_task_enabled(
     thread_id: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if state.desktop.set_enabled(&thread_id, enabled).await? {
+        return Ok(());
+    }
     if state.is_managed(&thread_id).await? {
         return state.managed.set_auto_resume(&thread_id, enabled).await;
     }
@@ -55,6 +61,7 @@ async fn set_task_enabled(
 
 #[tauri::command]
 async fn set_paused(state: State<'_, Shared>, paused: bool) -> Result<(), String> {
+    state.desktop.pause_all(paused).await?;
     state.managed.pause_all(paused).await?;
     let mut runtime = state.runtime.lock().await;
     runtime.set_paused(paused)?;
@@ -64,6 +71,9 @@ async fn set_paused(state: State<'_, Shared>, paused: bool) -> Result<(), String
 
 #[tauri::command]
 async fn remove_task(state: State<'_, Shared>, thread_id: String) -> Result<(), String> {
+    if state.desktop.set_enabled(&thread_id, false).await? {
+        return Ok(());
+    }
     if state.is_managed(&thread_id).await? {
         return state.managed.remove(&thread_id).await;
     }
@@ -175,6 +185,7 @@ fn show_main_window(
 }
 
 pub fn run() {
+    let exiting = std::sync::atomic::AtomicBool::new(false);
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_window(app);
@@ -245,6 +256,9 @@ pub fn run() {
                     "pause" => {
                         let state = app.state::<Shared>().inner().clone();
                         tauri::async_runtime::spawn(async move {
+                            if state.desktop.pause_all(true).await.is_err() {
+                                return;
+                            }
                             if state.managed.pause_all(true).await.is_err() {
                                 return;
                             }
@@ -261,6 +275,14 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            let heartbeat = state.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    // Keep the lease alive even when every WebView is hidden.
+                    let _ = heartbeat.desktop.views().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
             tauri::async_runtime::spawn(async move {
                 // Every tick obtains fresh server state, including after sleep. Never
                 // replay timer firings or missed quota windows on wake.
@@ -284,7 +306,20 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("无法启动 Codex AutoResume")
-        .run(|app, event| {
+        .run(move |app, event| {
+            if let tauri::RunEvent::ExitRequested { ref api, .. } = event {
+                if !exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let app = app.clone();
+                    let state = app.state::<Shared>().inner().clone();
+                    tauri::async_runtime::spawn(async move {
+                        state.desktop.revoke_all().await;
+                        let _ = state.managed.pause_all(true).await;
+                        app.exit(0);
+                    });
+                    return;
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 let _ = show_window(app);

@@ -12,7 +12,7 @@ export interface TaskView {
   detail: string
   resetsAt: number | null
   events: TaskEvent[]
-  mode: 'monitor' | 'managed'
+  mode: 'monitor' | 'managed' | 'desktop'
   canEnable?: boolean
 }
 
@@ -25,7 +25,7 @@ export interface QuotaWindow {
 
 export interface QuotaTelemetry {
   observedAt: number
-  source: 'local' | 'managed'
+  source: 'local' | 'managed' | 'desktop'
   buckets: {
     id: string
     label: string | null

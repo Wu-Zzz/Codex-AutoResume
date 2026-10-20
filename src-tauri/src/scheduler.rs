@@ -46,10 +46,10 @@ pub struct TaskRecord {
     pub required_limit_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
-    pub mode: &'static str,
+    pub mode: String,
     pub can_enable: bool,
     pub id: String,
     pub title: String,
@@ -64,7 +64,7 @@ pub struct TaskView {
 impl From<&TaskRecord> for TaskView {
     fn from(task: &TaskRecord) -> Self {
         Self {
-            mode: "monitor",
+            mode: "monitor".into(),
             can_enable: true,
             id: task.id.clone(),
             title: task.title.clone(),

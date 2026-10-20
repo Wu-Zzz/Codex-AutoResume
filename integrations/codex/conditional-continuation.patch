@@ -1,0 +1,954 @@
+--- a/codex-rs/app-server/src/main.rs
++++ b/codex-rs/app-server/src/main.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ #![recursion_limit = "256"]
+ 
+ use clap::Parser;
+@@ -45,6 +46,14 @@
+     )]
+     listen: AppServerTransport,
+ 
++    /// Match the `codex app-server` transport alias used by Desktop integrations.
++    #[arg(long = "stdio", conflicts_with = "listen")]
++    stdio: bool,
++
++    /// Preserve the caller's analytics default; explicit config still takes precedence.
++    #[arg(long = "analytics-default-enabled")]
++    analytics_default_enabled: bool,
++
+     /// Session source used to derive product restrictions and metadata.
+     #[arg(
+         long = "session-source",
+@@ -83,6 +92,8 @@
+             config_overrides,
+             code_mode_host,
+             listen,
++            stdio,
++            analytics_default_enabled,
+             session_source,
+             auth,
+             strict_config,
+@@ -98,7 +109,11 @@
+                 .map(LoaderOverrides::with_managed_config_path_for_tests)
+                 .unwrap_or_default()
+         };
+-        let transport = listen;
++        let transport = if stdio {
++            AppServerTransport::Stdio
++        } else {
++            listen
++        };
+         let auth = auth.try_into_settings()?;
+         let mut runtime_options = AppServerRuntimeOptions {
+             code_mode_host_transport: code_mode_host.into(),
+@@ -121,7 +136,7 @@
+             config_overrides,
+             loader_overrides,
+             strict_config,
+-            /*default_analytics_enabled*/ false,
++            analytics_default_enabled,
+             transport,
+             session_source,
+             auth,
+--- a/codex-rs/app-server/src/main_tests.rs
++++ b/codex-rs/app-server/src/main_tests.rs
+@@ -1,9 +1,39 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use super::AppServerArgs;
+ use clap::Parser;
+ use codex_app_server::AppServerTransport;
+ use pretty_assertions::assert_eq;
+ use toml::Value as TomlValue;
+ use url::Url;
++
++#[test]
++fn app_server_accepts_desktop_launch_arguments_without_changing_defaults() {
++    let args = AppServerArgs::try_parse_from([
++        "codex-app-server",
++        "-c",
++        "features.code_mode_host=true",
++        "--analytics-default-enabled",
++        "--stdio",
++    ])
++    .expect("Desktop parameters after removing only the app-server subcommand");
++    assert!(args.stdio);
++    assert!(args.analytics_default_enabled);
++    // The official `codex app-server` branch also uses VSCode session source.
++    assert_eq!(
++        args.session_source,
++        codex_protocol::protocol::SessionSource::VSCode
++    );
++    assert_eq!(
++        args.config_overrides.parse_overrides().unwrap(),
++        vec![(
++            "features.code_mode_host".to_owned(),
++            TomlValue::Boolean(true)
++        )]
++    );
++    assert!(
++        AppServerArgs::try_parse_from(["codex-app-server", "--stdio", "--listen", "off"]).is_err()
++    );
++}
+ 
+ #[test]
+ fn app_server_accepts_cli_config_overrides() {
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::future::Future;
+@@ -996,6 +997,7 @@
+             | ClientRequest::ThreadDelete { .. }
+             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
+             ClientRequest::TurnStart { .. }
++            | ClientRequest::TurnContinueIfFailed { .. }
+             | ClientRequest::TurnSteer { .. }
+             | ClientRequest::ReviewStart { .. }
+             | ClientRequest::ThreadCompactStart { .. }
+@@ -1640,6 +1642,18 @@
+                     .mock_experimental_method(params)
+                     .await
+             }
++            ClientRequest::AutoResumeCapabilities { .. } => Ok(Some(
++                codex_app_server_protocol::AutoResumeCapabilitiesResponse {
++                    version: 1,
++                    conditional_continuation: true,
++                }
++                .into(),
++            )),
++            ClientRequest::TurnContinueIfFailed { params, .. } => {
++                self.turn_processor
++                    .turn_continue_if_failed(&request_id, params)
++                    .await
++            }
+             ClientRequest::TurnStart { params, .. } => {
+                 self.turn_processor
+                     .turn_start(
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -1,9 +1,15 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use super::thread_input::ensure_direct_input_allowed;
+ use super::*;
+ use codex_agent_extension::AgentInvocation;
+ use codex_agent_extension::AgentRun;
+ use codex_agent_extension::AgentRunner;
+ use codex_app_server_protocol::ImageReference as V2ImageReference;
++use codex_app_server_protocol::TurnContinueIfFailedParams;
++use codex_app_server_protocol::TurnContinueIfFailedResponse;
++use codex_core::context::ContextualUserFragment;
++use codex_core::context::InternalContextSource;
++use codex_core::context::InternalModelContextFragment;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::FunctionCallOutputBody;
+@@ -143,6 +149,103 @@
+ }
+ 
+ impl TurnRequestProcessor {
++    pub(crate) async fn turn_continue_if_failed(
++        &self,
++        request_id: &ConnectionRequestId,
++        params: TurnContinueIfFailedParams,
++    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        let rejected = |reason: &str| {
++            Ok(Some(
++                TurnContinueIfFailedResponse::Rejected {
++                    reason: reason.to_owned(),
++                }
++                .into(),
++            ))
++        };
++        if params.expected_previous_turn_id.is_empty() {
++            return rejected("missingPreviousTurn");
++        }
++        // get_thread never loads history or resumes a cold runtime.
++        let Ok((thread_id, thread)) = self.load_thread(&params.thread_id).await else {
++            return rejected("notLoaded");
++        };
++        if !self
++            .thread_state_manager
++            .subscribed_connection_ids(thread_id)
++            .await
++            .contains(&request_id.connection_id)
++        {
++            return rejected("notSubscribed");
++        }
++        self.ensure_direct_input_allowed(request_id, thread.as_ref())
++            .await?;
++        self.config_manager
++            .check_thread_model_provider(thread.config().await.as_ref())
++            .await
++            .map_err(|error| config_load_error(&error))?;
++        let state = self.thread_state_manager.thread_state(thread_id).await;
++        let mut options = {
++            let mut state = state.lock().await;
++            if !state.listener_matches(&thread) {
++                return rejected("liveGenerationChanged");
++            }
++            match state.claim_autoresume_failure(&params.expected_previous_turn_id) {
++                Ok(options) => options,
++                Err(reason) => return rejected(reason),
++            }
++        };
++        // Preserve non-sticky turn settings too; no client-supplied input or
++        // execution overrides can reach this method.
++        options.turn_trigger = Some("autoresume".to_owned());
++        let continuation = ContextualUserFragment::into(InternalModelContextFragment::new(
++            InternalContextSource::from_static("autoresume"),
++            "Continue the original work interrupted by the usage limit. First check the current state before repeating any action. Preserve the original scope and execution permissions. Wait for the user if approval or additional information is required.",
++        ));
++        let submission = thread
++            .continue_turn_if_idle(
++                TurnInputRequest::new(TurnInput::ResponseItem(continuation))
++                    .on_start(options.clone()),
++                params.expected_previous_turn_id,
++            )
++            .await
++            .map_err(|error| internal_error(format!("conditional continuation failed: {error}")))?;
++        match submission {
++            TurnInputSubmission::Started { turn_id, .. } => {
++                state
++                    .lock()
++                    .await
++                    .remember_autoresume_options(turn_id.clone(), options);
++                self.outgoing
++                    .record_request_turn_id(request_id, &turn_id)
++                    .await;
++                Ok(Some(
++                    TurnContinueIfFailedResponse::Started { turn_id }.into(),
++                ))
++            }
++            TurnInputSubmission::NotSubmitted { reason } => rejected(match reason {
++                NotSubmittedReason::NotIdle => "notIdle",
++                NotSubmittedReason::Superseded => "superseded",
++                NotSubmittedReason::PendingTriggerTurn => "pendingTriggerTurn",
++                NotSubmittedReason::ServerDraining => "serverDraining",
++                _ => "guardRejected",
++            }),
++            TurnInputSubmission::Steered { .. } => {
++                unreachable!("conditional internal continuation cannot steer")
++            }
++        }
++    }
++
++    async fn invalidate_autoresume(&self, thread_id: &str) {
++        if let Ok(thread_id) = ThreadId::from_string(thread_id) {
++            self.thread_state_manager
++                .thread_state(thread_id)
++                .await
++                .lock()
++                .await
++                .invalidate_autoresume();
++        }
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+         auth_manager: Arc<AuthManager>,
+@@ -181,6 +284,7 @@
+         app_server_client_name: Option<String>,
+         app_server_client_version: Option<String>,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.invalidate_autoresume(&params.thread_id).await;
+         validate_user_input_image_urls(&params.input)?;
+         self.turn_start_inner(
+             request_id,
+@@ -207,6 +311,7 @@
+         request_id: &ConnectionRequestId,
+         params: ThreadSettingsUpdateParams,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.invalidate_autoresume(&params.thread_id).await;
+         self.thread_settings_update_inner(request_id, params)
+             .await
+             .map(|response| Some(response.into()))
+@@ -217,6 +322,7 @@
+         request_id: &ConnectionRequestId,
+         params: TurnSettingsUpdateParams,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.invalidate_autoresume(&params.thread_id).await;
+         let (_, thread) = self.load_thread(&params.thread_id).await?;
+         self.ensure_direct_input_allowed(request_id, thread.as_ref())
+             .await?;
+@@ -260,6 +366,7 @@
+         request_id: &ConnectionRequestId,
+         params: TurnSteerParams,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.invalidate_autoresume(&params.thread_id).await;
+         validate_user_input_image_urls(&params.input)?;
+         self.turn_steer_inner(request_id, params)
+             .await
+@@ -271,6 +378,7 @@
+         request_id: &ConnectionRequestId,
+         params: TurnInterruptParams,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.invalidate_autoresume(&params.thread_id).await;
+         let result = self.turn_interrupt_inner(request_id, params).await;
+         if let Err(error) = &result {
+             self.track_error_response(request_id, error, /*error_type*/ None);
+@@ -658,19 +766,20 @@
+             )
+             .await?;
+ 
++        let start_options = TurnStartOptions {
++            turn_trigger: params.turn_trigger,
++            parent_turn_id: params.parent_turn_id,
++            initiating_agent_path: None,
++            root_turn_id: params.root_turn_id,
++            final_output_json_schema: params.output_schema,
++            service_tier: params.service_tier_for_turn,
++            cyber_access_program: params.cyber_access_program.map(Into::into),
++        };
+         let submission = thread
+             .start_or_steer_turn(
+                 TurnInputRequest::new(input)
+                     .with_thread_settings(thread_settings)
+-                    .on_start(TurnStartOptions {
+-                        turn_trigger: params.turn_trigger,
+-                        parent_turn_id: params.parent_turn_id,
+-                        initiating_agent_path: None,
+-                        root_turn_id: params.root_turn_id,
+-                        final_output_json_schema: params.output_schema,
+-                        service_tier: params.service_tier_for_turn,
+-                        cyber_access_program: params.cyber_access_program.map(Into::into),
+-                    })
++                    .on_start(start_options.clone())
+                     .with_additional_context(additional_context)
+                     .with_responses_metadata(params.responsesapi_client_metadata)
+                     .with_trace(self.request_trace_context(&request_id).await),
+@@ -700,6 +809,17 @@
+                 return Err(error);
+             }
+         };
++
++        if started {
++            let mut continuation_options = start_options;
++            continuation_options.root_turn_id = Some(root_turn_id.clone());
++            self.thread_state_manager
++                .thread_state(thread_id)
++                .await
++                .lock()
++                .await
++                .remember_autoresume_options(turn_id.clone(), continuation_options);
++        }
+ 
+         if turn_has_input && started {
+             let config_snapshot = thread.config_snapshot().await;
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use crate::outgoing_message::ConnectionId;
+ use crate::outgoing_message::ConnectionRequestId;
+ use codex_app_server_protocol::RequestId;
+@@ -11,6 +12,7 @@
+ use codex_app_server_protocol::TurnItemsView;
+ use codex_core::CodexThread;
+ use codex_core::ThreadConfigSnapshot;
++use codex_core::TurnStartOptions;
+ use codex_file_watcher::WatchRegistration;
+ use codex_protocol::ThreadId;
+ #[cfg(test)]
+@@ -106,6 +108,10 @@
+     pub(crate) pending_interrupts: PendingInterruptQueue,
+     pub(crate) turn_summary: TurnSummary,
+     pub(crate) last_terminal_turn_id: Option<String>,
++    // Live-only evidence: never reconstructed from persisted history. A failed
++    // turn may be claimed once, and Core performs the atomic final idle/ID guard.
++    autoresume_failure: Option<String>,
++    autoresume_options: Option<(String, TurnStartOptions)>,
+     /// Lets an internal runtime replacement wait until the old listener has processed Core's
+     /// `ShutdownComplete` event before that listener is superseded.
+     shutdown_drain_waiter: Option<oneshot::Sender<()>>,
+@@ -138,6 +144,8 @@
+             let _ = previous.send(());
+         }
+         self.listener_generation = self.listener_generation.wrapping_add(1);
++        self.autoresume_failure = None;
++        self.autoresume_options = None;
+         self.last_thread_settings = Some(thread_settings_baseline);
+         let (listener_command_tx, listener_command_rx) = mpsc::unbounded_channel();
+         self.listener_command_tx = Some(listener_command_tx);
+@@ -153,6 +161,8 @@
+         self.shutdown_drain_waiter = None;
+         self.listener_command_tx = None;
+         self.current_turn_history.reset();
++        self.autoresume_failure = None;
++        self.autoresume_options = None;
+         self.listener_thread = None;
+         self.watch_registration = WatchRegistration::default();
+     }
+@@ -199,6 +209,24 @@
+     }
+ 
+     pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
++        match event {
++            EventMsg::TurnStarted(_) | EventMsg::TurnAborted(_) => {
++                self.autoresume_failure = None;
++            }
++            EventMsg::TurnComplete(completed) => {
++                self.autoresume_failure = (completed.turn_id == event_turn_id
++                    && self.active_turn_id() == Some(event_turn_id)
++                    && matches!(
++                        completed
++                            .error
++                            .as_ref()
++                            .and_then(|error| error.codex_error_info.as_ref()),
++                        Some(codex_protocol::protocol::CodexErrorInfo::UsageLimitExceeded)
++                    ))
++                .then(|| event_turn_id.to_owned());
++            }
++            _ => {}
++        }
+         if let EventMsg::TurnStarted(payload) = event {
+             self.turn_summary.started_at = payload.started_at;
+         }
+@@ -223,8 +251,46 @@
+ 
+     pub(crate) fn note_thread_settings(&mut self, thread_settings: ThreadSettings) -> bool {
+         let changed = self.last_thread_settings.as_ref() != Some(&thread_settings);
++        if changed {
++            self.autoresume_failure = None;
++        }
+         self.last_thread_settings = Some(thread_settings);
+         changed
++    }
++
++    pub(crate) fn remember_autoresume_options(
++        &mut self,
++        turn_id: String,
++        options: TurnStartOptions,
++    ) {
++        self.autoresume_options = Some((turn_id, options));
++    }
++
++    pub(crate) fn invalidate_autoresume(&mut self) {
++        self.autoresume_failure = None;
++        self.autoresume_options = None;
++    }
++
++    /// Claim exactly one live quota failure. Rejected/uncertain submissions are
++    /// deliberately not rearmed; the caller must observe a later new failure.
++    pub(crate) fn claim_autoresume_failure(
++        &mut self,
++        expected_turn_id: &str,
++    ) -> Result<TurnStartOptions, &'static str> {
++        if !self.pending_interrupts.is_empty() || self.active_turn_id().is_some() {
++            return Err("notIdle");
++        }
++        if self.autoresume_failure.as_deref() != Some(expected_turn_id) {
++            return Err("noMatchingQuotaFailure");
++        }
++        let Some((turn_id, options)) = &self.autoresume_options else {
++            return Err("configurationUnverified");
++        };
++        if turn_id != expected_turn_id {
++            return Err("configurationUnverified");
++        }
++        self.autoresume_failure = None;
++        Ok(options.clone())
+     }
+ }
+ 
+@@ -271,6 +337,123 @@
+     use codex_protocol::config_types::Settings;
+     use codex_utils_absolute_path::AbsolutePathBuf;
+     use pretty_assertions::assert_eq;
++
++    fn start_autoresume_test_turn(state: &mut ThreadState, id: &str) {
++        state.track_current_turn_event(
++            id,
++            &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
++                turn_attribution: None,
++                turn_id: id.to_owned(),
++                root_turn_id: None,
++                trace_id: None,
++                started_at: None,
++                model_context_window: None,
++                collaboration_mode_kind: Default::default(),
++            }),
++        );
++        state.remember_autoresume_options(
++            id.to_owned(),
++            TurnStartOptions {
++                service_tier: Some("priority".to_owned()),
++                final_output_json_schema: Some(serde_json::json!({"type":"object"})),
++                ..Default::default()
++            },
++        );
++    }
++
++    fn finish_autoresume_test_turn(
++        state: &mut ThreadState,
++        id: &str,
++        code: Option<codex_protocol::protocol::CodexErrorInfo>,
++    ) {
++        state.track_current_turn_event(
++            id,
++            &EventMsg::TurnComplete(codex_protocol::protocol::TurnCompleteEvent {
++                root_turn_id: None,
++                turn_id: id.to_owned(),
++                last_agent_message: None,
++                error: code.map(|code| codex_protocol::protocol::ErrorEvent {
++                    message: "untrusted text says usage limit exceeded".to_owned(),
++                    codex_error_info: Some(code),
++                    misalignment: None,
++                }),
++                started_at: None,
++                completed_at: None,
++                duration_ms: None,
++                time_to_first_token_ms: None,
++            }),
++        );
++    }
++
++    #[test]
++    fn autoresume_claim_requires_terminal_quota_evidence_and_is_one_shot() {
++        use codex_protocol::protocol::CodexErrorInfo;
++        let mut state = ThreadState::default();
++        start_autoresume_test_turn(&mut state, "failed");
++        assert!(state.claim_autoresume_failure("failed").is_err());
++        finish_autoresume_test_turn(
++            &mut state,
++            "failed",
++            Some(CodexErrorInfo::UsageLimitExceeded),
++        );
++        assert!(state.claim_autoresume_failure("different").is_err());
++        let options = state.claim_autoresume_failure("failed").unwrap();
++        assert_eq!(options.service_tier.as_deref(), Some("priority"));
++        assert_eq!(
++            options.final_output_json_schema,
++            Some(serde_json::json!({"type":"object"}))
++        );
++        assert!(state.claim_autoresume_failure("failed").is_err());
++
++        for code in [None, Some(CodexErrorInfo::Other)] {
++            start_autoresume_test_turn(&mut state, "ordinary");
++            finish_autoresume_test_turn(&mut state, "ordinary", code);
++            assert!(state.claim_autoresume_failure("ordinary").is_err());
++        }
++    }
++
++    #[test]
++    fn autoresume_new_activity_settings_and_listener_loss_revoke_failure() {
++        use codex_protocol::protocol::CodexErrorInfo;
++        for mutation in ["newTurn", "settings", "stop", "disconnect"] {
++            let mut state = ThreadState::default();
++            start_autoresume_test_turn(&mut state, "failed");
++            finish_autoresume_test_turn(
++                &mut state,
++                "failed",
++                Some(CodexErrorInfo::UsageLimitExceeded),
++            );
++            match mutation {
++                "newTurn" => start_autoresume_test_turn(&mut state, "new"),
++                "settings" => {
++                    state.note_thread_settings(thread_settings("changed-model"));
++                }
++                "stop" => state.invalidate_autoresume(),
++                "disconnect" => state.clear_listener(),
++                _ => unreachable!(),
++            }
++            assert!(
++                state.claim_autoresume_failure("failed").is_err(),
++                "{mutation}"
++            );
++        }
++    }
++
++    #[test]
++    fn autoresume_rejects_missing_configuration_and_late_old_completion() {
++        use codex_protocol::protocol::CodexErrorInfo;
++        let mut state = ThreadState::default();
++        start_autoresume_test_turn(&mut state, "old");
++        start_autoresume_test_turn(&mut state, "new");
++        finish_autoresume_test_turn(&mut state, "old", Some(CodexErrorInfo::UsageLimitExceeded));
++        assert!(state.claim_autoresume_failure("old").is_err());
++        finish_autoresume_test_turn(&mut state, "new", Some(CodexErrorInfo::UsageLimitExceeded));
++        state.autoresume_options = None;
++        assert!(matches!(
++            state.claim_autoresume_failure("new"),
++            Err("configurationUnverified")
++        ));
++    }
+ 
+     #[test]
+     fn note_thread_settings_reports_only_effective_changes() {
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ mod account;
+ #[path = "account_system_proxy_tests.rs"]
+ mod account_system_proxy;
+@@ -12,6 +13,7 @@
+ #[path = "auth_storage_originator_tests.rs"]
+ mod auth_storage_originator;
+ mod auto_env;
++mod autoresume;
+ #[path = "bedrock_gov_cloud_tests.rs"]
+ mod bedrock_gov_cloud;
+ #[path = "bedrock_service_tier_tests.rs"]
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ #[cfg(test)]
+ use std::path::Path;
+ use std::path::PathBuf;
+@@ -1053,6 +1054,16 @@
+         params: v2::PluginUninstallParams,
+         serialization: global("config"),
+         response: v2::PluginUninstallResponse,
++    },
++    AutoResumeCapabilities => "autoresume/capabilities" {
++        params: v2::AutoResumeCapabilitiesParams,
++        serialization: None,
++        response: v2::AutoResumeCapabilitiesResponse,
++    },
++    TurnContinueIfFailed => "turn/continueIfFailed" {
++        params: v2::TurnContinueIfFailedParams,
++        serialization: thread_id(params.thread_id),
++        response: v2::TurnContinueIfFailedResponse,
+     },
+     TurnStart => "turn/start" {
+         params: v2::TurnStartParams,
+--- a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use super::ApprovalsReviewer;
+ use super::AskForApproval;
+ use super::SandboxPolicy;
+@@ -38,6 +39,42 @@
+ }
+ 
+ // Turn APIs
++/// Local AutoResume extension. Stock servers reject this separate method.
++#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct AutoResumeCapabilitiesParams {}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct AutoResumeCapabilitiesResponse {
++    pub version: u32,
++    pub conditional_continuation: bool,
++}
++
++/// No user input, credentials, or permission/configuration overrides are accepted.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct TurnContinueIfFailedParams {
++    pub thread_id: String,
++    pub expected_previous_turn_id: String,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(tag = "status", rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub enum TurnContinueIfFailedResponse {
++    Started {
++        #[serde(rename = "turnId")]
++        turn_id: String,
++    },
++    Rejected {
++        reason: String,
++    },
++}
++
+ /// Experimental settings changes for one running turn, not future turns.
+ /// Unsupported fields are rejected rather than silently ignored.
+ /// Any live task kind may accept publication. Child sessions and consumers of
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -1,3 +1,4 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ use super::*;
+ use crate::config::Constrained;
+ use crate::session::step_settings::StepSettingsUpdate;
+@@ -247,6 +248,71 @@
+     );
+ 
+     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++}
++
++/// An internal goal/queue can start after the App Server checked a quota
++/// failure. The final Core admission must reject rather than steer into it.
++#[tokio::test]
++async fn autoresume_continuation_rejects_internal_start_and_completed_successor() {
++    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
++    session.state.lock().await.last_started_turn_id = Some("quota-failed".to_owned());
++    let settings = session.thread_settings_snapshot().await;
++    session
++        .spawn_task(
++            Arc::clone(&turn_context),
++            Vec::new(),
++            NeverEndingTask {
++                kind: TaskKind::Regular,
++                listen_to_cancellation_token: true,
++            },
++        )
++        .await;
++    session.state.lock().await.last_started_turn_id = Some(turn_context.sub_id.clone());
++    for expected_reason in [NotSubmittedReason::NotIdle, NotSubmittedReason::Superseded] {
++        let history_before = session
++            .clone_history()
++            .await
++            .raw_items()
++            .cloned()
++            .collect::<Vec<_>>();
++        let outcome = handle(
++            &session,
++            TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message("continue"))),
++            TurnInputMode::ContinueIfIdle {
++                expected_previous_turn_id: "quota-failed".to_owned(),
++            },
++            "autoresume-attempt".to_owned(),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            outcome,
++            TurnInputSubmission::NotSubmitted {
++                reason: expected_reason
++            }
++        );
++        assert_eq!(session.thread_settings_snapshot().await, settings);
++        assert_eq!(
++            session
++                .clone_history()
++                .await
++                .raw_items()
++                .cloned()
++                .collect::<Vec<_>>(),
++            history_before,
++            "rejected continuation must not enter conversation history"
++        );
++        assert!(
++            session
++                .input_queue
++                .get_pending_input(&session.active_turn)
++                .await
++                .0
++                .is_empty(),
++            "rejection must not queue or steer continuation input"
++        );
++        session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    }
+ }
+ 
+ #[tokio::test]
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/autoresume.rs
+@@ -0,0 +1,204 @@
++// Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
++//! Isolated HTTP/stdio tests; no real account or external model is used.
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use codex_app_server_protocol::AutoResumeCapabilitiesParams;
++use codex_app_server_protocol::AutoResumeCapabilitiesResponse;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::JSONRPCMessage;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::TurnCompletedNotification;
++use codex_app_server_protocol::TurnContinueIfFailedParams;
++use codex_app_server_protocol::TurnContinueIfFailedResponse;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::TurnStatus;
++use codex_app_server_protocol::UserInput;
++use codex_features::Feature;
++use core_test_support::responses;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tempfile::TempDir;
++use wiremock::Mock;
++use wiremock::ResponseTemplate;
++use wiremock::matchers::method;
++use wiremock::matchers::path_regex;
++
++fn user_turn(thread_id: &str) -> TurnStartParams {
++    TurnStartParams {
++        thread_id: thread_id.to_owned(),
++        input: vec![UserInput::Text {
++            text: "Continue the fixture task".to_owned(),
++            text_elements: Vec::new(),
++        }],
++        ..Default::default()
++    }
++}
++
++async fn continue_failed(
++    server: &mut TestAppServer,
++    thread_id: &str,
++    previous_turn_id: &str,
++) -> Result<TurnContinueIfFailedResponse> {
++    server
++        .request(|request_id| ClientRequest::TurnContinueIfFailed {
++            request_id,
++            params: TurnContinueIfFailedParams {
++                thread_id: thread_id.to_owned(),
++                expected_previous_turn_id: previous_turn_id.to_owned(),
++            },
++        })
++        .await
++}
++
++#[test]
++fn conditional_continuation_cannot_accept_input_or_permission_overrides() {
++    for key in [
++        "input",
++        "prompt",
++        "approvalPolicy",
++        "sandboxPolicy",
++        "model",
++    ] {
++        let mut value = json!({"threadId":"thread", "expectedPreviousTurnId":"failed"});
++        value[key] = json!("unexpected");
++        assert!(serde_json::from_value::<TurnContinueIfFailedParams>(value).is_err());
++    }
++}
++
++#[tokio::test]
++async fn autoresume_continues_one_live_quota_failure_in_the_same_thread() -> Result<()> {
++    let mock = responses::start_mock_server().await;
++    Mock::given(method("POST"))
++        .and(path_regex(".*/responses$"))
++        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
++            "error": {"type":"usage_limit_reached", "message":"fixture", "plan_type":"pro"}
++        })))
++        .up_to_n_times(1)
++        .expect(1)
++        .mount(&mock)
++        .await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&mock.uri())
++        // The production client intentionally strips internal metadata for
++        // non-OpenAI providers. Exercise OpenAI serialization against localhost.
++        .with_provider_name("OpenAI")
++        .enable_feature(Feature::ContentItemKinds)
++        .with_provider_config("supports_websockets = false")
++        .write(home.path())?;
++    let mut server = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .without_managed_config()
++        .build_initialized()
++        .await?;
++    let capability: AutoResumeCapabilitiesResponse = server
++        .request(|request_id| ClientRequest::AutoResumeCapabilities {
++            request_id,
++            params: AutoResumeCapabilitiesParams {},
++        })
++        .await?;
++    assert_eq!(capability.version, 1);
++    assert!(capability.conditional_continuation);
++    let thread = server
++        .start_thread(ThreadStartParams::default())
++        .await?
++        .thread;
++    let failed = server
++        .start_turn_and_wait_for_completion(user_turn(&thread.id))
++        .await?;
++    assert_eq!(failed.turn.status, TurnStatus::Failed);
++    let model = responses::mount_sse_once(&mock, responses::sse_completed("continued")).await;
++    let result = continue_failed(&mut server, &thread.id, &failed.turn.id).await?;
++    let TurnContinueIfFailedResponse::Started { turn_id } = result else {
++        panic!("live terminal quota failure must continue: {result:?}")
++    };
++    assert_ne!(turn_id, failed.turn.id);
++    assert!(matches!(
++        continue_failed(&mut server, &thread.id, &failed.turn.id).await?,
++        TurnContinueIfFailedResponse::Rejected { .. }
++    ));
++    // Wait for this exact continuation to finish and verify that it does not
++    // fabricate a visible user message or create a different thread.
++    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
++    loop {
++        let message = tokio::time::timeout_at(deadline, server.read_next_message()).await??;
++        let JSONRPCMessage::Notification(notification) = message else {
++            continue;
++        };
++        let Some(params) = notification.params else {
++            continue;
++        };
++        if params["turnId"] == turn_id {
++            assert_eq!(params["threadId"], thread.id);
++            assert_ne!(params["item"]["type"], "userMessage");
++        }
++        if notification.method == "turn/completed" {
++            let completed: TurnCompletedNotification = serde_json::from_value(params)?;
++            if completed.turn.id == turn_id {
++                assert_eq!(completed.thread_id, thread.id);
++                assert_eq!(completed.turn.status, TurnStatus::Completed);
++                break;
++            }
++        }
++    }
++    assert_eq!(model.requests().len(), 1);
++    let request = model.single_request();
++    assert!(
++        request.has_content_kinds(&["autoresume.internal_context"]),
++        "continuation must retain its internal-context annotation"
++    );
++    let input = request.input();
++    let continuation_items: Vec<_> = input
++        .iter()
++        .filter(|item| {
++            item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
++                == json!(["autoresume.internal_context"])
++        })
++        .collect();
++    assert_eq!(continuation_items.len(), 1);
++    let continuation = continuation_items[0];
++    assert_eq!(continuation["role"], "user");
++    assert_eq!(
++        continuation["content"],
++        json!([{
++            "type": "input_text",
++            "text": "<codex_internal_context source=\"autoresume\">\nContinue the original work interrupted by the usage limit. First check the current state before repeating any action. Preserve the original scope and execution permissions. Wait for the user if approval or additional information is required.\n</codex_internal_context>"
++        }])
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn autoresume_rejects_normal_completion_and_unloaded_history() -> Result<()> {
++    let mock = responses::start_mock_server().await;
++    let model = responses::mount_sse_once(&mock, responses::sse_completed("normal")).await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&mock.uri())
++        .with_provider_config("supports_websockets = false")
++        .write(home.path())?;
++    let mut server = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .without_managed_config()
++        .build_initialized()
++        .await?;
++    let thread = server
++        .start_thread(ThreadStartParams::default())
++        .await?
++        .thread;
++    let completed = server
++        .start_turn_and_wait_for_completion(user_turn(&thread.id))
++        .await?;
++    assert_eq!(completed.turn.status, TurnStatus::Completed);
++    assert!(matches!(
++        continue_failed(&mut server, &thread.id, &completed.turn.id).await?,
++        TurnContinueIfFailedResponse::Rejected { .. }
++    ));
++    assert_eq!(
++        continue_failed(&mut server, "00000000-0000-0000-0000-000000000001", "old").await?,
++        TurnContinueIfFailedResponse::Rejected {
++            reason: "notLoaded".to_owned()
++        }
++    );
++    assert_eq!(model.requests().len(), 1);
++    Ok(())
++}

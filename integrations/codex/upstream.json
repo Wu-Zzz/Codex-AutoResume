@@ -1,0 +1,17 @@
+{
+  "repository": "https://github.com/openai/codex",
+  "tag": "rust-v0.163.0",
+  "archiveUrl": "https://github.com/openai/codex/archive/refs/tags/rust-v0.163.0.tar.gz",
+  "archiveSha256": "5990ddb133184ce5e470c741d14f1eeb24a0b6cd36685ef78fb772cf83cab7fc",
+  "rustToolchain": "1.95.0",
+  "patches": [
+    "conditional-continuation.patch",
+    "release-lock-versions.patch"
+  ],
+  "lockfile": {
+    "path": "codex-rs/Cargo.lock",
+    "beforeSha256": "17cdd862471774ba7aef836aaf0a0a3ed76bd23e503b1fc7278c89d1f2719d03",
+    "afterSha256": "cae541406f7ec43a418e126be2bcd5de00b243e7bbf6382570028727d99c1069",
+    "changedLocalPackageVersions": 160
+  }
+}

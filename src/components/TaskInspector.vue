@@ -13,7 +13,7 @@ defineEmits<{ remove: [] }>()
 <template>
   <section class="task-inspector" aria-label="任务详情">
     <div class="inspector-heading">
-      <div class="inspector-title"><h2 :title="task.title">{{ task.title || '未命名任务' }}</h2><button class="text-button remove-button" :disabled="busy" title="停止本工具管理，不删除原会话" @click="$emit('remove')">移出列表</button></div>
+      <div class="inspector-title"><h2 :title="task.title">{{ task.title || '未命名任务' }}</h2><button v-if="task.mode !== 'desktop'" class="text-button remove-button" :disabled="busy" title="停止本工具管理，不删除原会话" @click="$emit('remove')">移出列表</button></div>
       <p class="inspector-path"><img :src="folder" alt=""/><span :title="task.cwd">{{ task.cwd || '未指定项目' }}</span></p>
     </div>
     <div class="state-panel" :class="task.state">
@@ -22,12 +22,12 @@ defineEmits<{ remove: [] }>()
       <p v-if="task.state === 'waiting_quota'" class="quota-time">{{ task.resetsAt === null ? '额度重置时间尚不确定' : `${formatTime(task.resetsAt, true)} 后核对额度` }}</p>
     </div>
     <details class="task-diagnostics" :key="task.id">
-      <summary><img :src="chevron" alt=""/>检查详情<span>{{ pausedAll ? '全局已暂停' : task.mode === 'managed' ? (task.enabled ? '续跑已开启' : '续跑已关闭') : (task.enabled ? '监测已开启' : '监测已关闭') }}</span></summary>
+      <summary><img :src="chevron" alt=""/>检查详情<span>{{ pausedAll ? '全局已暂停' : task.mode !== 'monitor' ? (task.enabled ? '续跑已开启' : '续跑已关闭') : (task.enabled ? '监测已开启' : '监测已关闭') }}</span></summary>
       <dl>
         <div><dt>{{ task.mode === 'managed' ? '托管编号' : '会话' }}</dt><dd class="mono selectable">{{ task.id }}</dd></div>
         <div><dt>最近核对</dt><dd class="mono">{{ formatTime(checkedAt, true) }}</dd></div>
-        <div><dt>管理方式</dt><dd>{{ task.mode === 'managed' ? '本工具启动 · 托管' : '已有会话 · 仅监测' }}</dd></div>
-        <div><dt>自动续跑</dt><dd>{{ task.mode === 'managed' ? (task.enabled ? '已授权' : '未开启') : '不接管原会话' }}</dd></div>
+        <div><dt>管理方式</dt><dd>{{ task.mode === 'desktop' ? '原 Desktop 聊天 · 实验桥接' : task.mode === 'managed' ? '本工具启动 · 终端托管' : '已有会话 · 仅监测' }}</dd></div>
+        <div><dt>自动续跑</dt><dd>{{ task.mode !== 'monitor' ? (task.enabled ? '已授权' : '未开启') : '不接管原会话' }}</dd></div>
       </dl>
     </details>
     <div class="activity">

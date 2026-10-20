@@ -1,9 +1,9 @@
-//! Strict parsing of complete account/rateLimits/read responses from CLI 0.145.0.
+//! Separate strict adapters for complete 0.145 and 0.163 quota responses.
 //! Notifications are sparse updates and must trigger another read, not use this parser.
 use crate::scheduler::{
     CreditsSnapshot, QuotaBucket, QuotaSnapshot, QuotaWindow, SpendControlWindow,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
@@ -12,15 +12,15 @@ const INVALID: &str = "额度返回格式不兼容，已停止自动续跑";
 const MAX_TIMESTAMP: i64 = 253_402_300_799; // Last UTC second representable in year 9999.
 
 /// Display-only observations, deliberately not accepted by the scheduler.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaTelemetry {
     pub observed_at: i64,
-    pub source: &'static str,
+    pub source: String,
     pub buckets: Vec<QuotaBucketTelemetry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaBucketTelemetry {
     pub id: String,
@@ -31,10 +31,10 @@ pub struct QuotaBucketTelemetry {
     pub blocked: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindowTelemetry {
-    pub kind: &'static str,
+    pub kind: String,
     pub duration_mins: Option<i64>,
     pub used_percent: Option<i64>,
     pub resets_at: Option<i64>,
@@ -62,7 +62,7 @@ pub fn parse_telemetry(value: &Value, observed_at: i64) -> Option<QuotaTelemetry
     }
     Some(QuotaTelemetry {
         observed_at,
-        source: "local",
+        source: "local".into(),
         buckets,
     })
 }
@@ -91,7 +91,7 @@ fn display_bucket(value: &Value, map_key: Option<&String>) -> Option<QuotaBucket
         .filter_map(|kind| {
             let value = value.get(kind)?.as_object()?;
             Some(QuotaWindowTelemetry {
-                kind,
+                kind: kind.into(),
                 duration_mins: value
                     .get("windowDurationMins")
                     .and_then(Value::as_i64)
@@ -163,6 +163,110 @@ pub fn parse_response(value: &Value, observed_at: i64) -> Result<QuotaSnapshot> 
         observed_at,
         buckets,
     })
+}
+
+/// Parse the verified Desktop 0.163 response without weakening the 0.145 adapter.
+/// The returned permission must be `Some(true)` before ordinary usage can resume;
+/// percentages, credits and reset times cannot substitute for that permission.
+pub fn parse_desktop_response(
+    value: &Value,
+    observed_at: i64,
+) -> Result<(QuotaSnapshot, Option<bool>)> {
+    let response = object(
+        value,
+        &[
+            "ordinaryUsageAllowed",
+            "rateLimits",
+            "rateLimitsByLimitId",
+            "rateLimitResetCredits",
+            "accountId",
+            "rateLimitUpsell",
+        ],
+    )?;
+    let ordinary_usage_allowed = nullable(&response["ordinaryUsageAllowed"], boolean)?;
+    // Validate only. Account identifiers never enter the scheduler or its store.
+    nullable(&response["accountId"], text)?;
+    // rateLimitUpsell is JsonValue|null in the official schema: every Value is
+    // valid metadata. It is neither cloned nor interpreted as execution consent.
+    let compatibility = desktop_bucket(&response["rateLimits"])?;
+    let buckets = match &response["rateLimitsByLimitId"] {
+        Value::Null => Value::Null,
+        Value::Object(entries) => {
+            let id = identifier(&response["rateLimits"]["limitId"])?;
+            // Compare before removing display metadata, so differences in model
+            // labels or plan information cannot hide an inconsistent snapshot.
+            if entries.get(&id) != Some(&response["rateLimits"]) {
+                return Err("额度兼容视图与完整快照不一致，已停止自动续跑".into());
+            }
+            let mut normalized = Map::with_capacity(entries.len());
+            for (id, value) in entries {
+                normalized.insert(id.clone(), desktop_bucket(value)?);
+            }
+            Value::Object(normalized)
+        }
+        _ => return Err("未取得完整额度桶，已停止自动续跑".into()),
+    };
+    let mut legacy = Map::new();
+    legacy.insert("rateLimits".into(), compatibility);
+    legacy.insert("rateLimitsByLimitId".into(), buckets);
+    legacy.insert(
+        "rateLimitResetCredits".into(),
+        response["rateLimitResetCredits"].clone(),
+    );
+    Ok((
+        parse_response(&Value::Object(legacy), observed_at)?,
+        ordinary_usage_allowed,
+    ))
+}
+
+fn desktop_bucket(value: &Value) -> Result<Value> {
+    let fields = object(
+        value,
+        &[
+            "limitId",
+            "limitName",
+            "normalModelSlug",
+            "primary",
+            "secondary",
+            "credits",
+            "individualLimit",
+            "spendControlReached",
+            "planType",
+            "rateLimitReachedType",
+        ],
+    )?;
+    nullable(&fields["normalModelSlug"], text)?;
+    nullable(&fields["planType"], |value| {
+        enum_value(
+            value,
+            &[
+                "free",
+                "go",
+                "plus",
+                "pro",
+                "prolite",
+                "promax",
+                "team",
+                "self_serve_business_prolite",
+                "self_serve_business_usage_based",
+                "business",
+                "ent26",
+                "enterprise_cbp_automation",
+                "enterprise_cbp_usage_based",
+                "enterprise",
+                "edu",
+                "edu_plus",
+                "edu_pro",
+                "unknown",
+            ],
+        )
+    })?;
+    let mut normalized = fields.clone();
+    normalized.remove("normalModelSlug");
+    // Plan names are display metadata, never an authorization gate. Validate the
+    // exact Desktop enum above, then reuse legacy checks for all quota controls.
+    normalized.insert("planType".into(), Value::Null);
+    Ok(Value::Object(normalized))
 }
 
 fn object<'a>(value: &'a Value, fields: &[&str]) -> Result<&'a Map<String, Value>> {
@@ -382,6 +486,17 @@ mod tests {
         })
     }
 
+    fn desktop_response(mut buckets: Vec<Value>, ordinary_usage_allowed: Value) -> Value {
+        for bucket in &mut buckets {
+            bucket["normalModelSlug"] = Value::Null;
+        }
+        let mut value = response(buckets);
+        value["ordinaryUsageAllowed"] = ordinary_usage_allowed;
+        value["accountId"] = Value::Null;
+        value["rateLimitUpsell"] = Value::Null;
+        value
+    }
+
     fn decide(quota: &QuotaSnapshot) -> Decision {
         let mut task = TaskRecord::new("task".into(), "fixture".into(), "/fixture".into());
         task.enabled = true;
@@ -415,6 +530,154 @@ mod tests {
         assert_eq!(parsed.observed_at, 100);
         assert_eq!(parsed.buckets.len(), 2);
         assert_eq!(decide(&parsed), Decision::WaitUntil(Some(500)));
+    }
+
+    #[test]
+    fn desktop_complete_shape_keeps_all_windows_and_explicit_permission() {
+        let buckets = vec![
+            sample_bucket("codex", 20, json!(200)),
+            sample_bucket("other", 100, json!(500)),
+        ];
+        let desktop = desktop_response(buckets.clone(), json!(true));
+        let (snapshot, ordinary) = parse_desktop_response(&desktop, 100).unwrap();
+        assert_eq!(snapshot, parse_response(&response(buckets), 100).unwrap());
+        assert_eq!(ordinary, Some(true));
+        assert_eq!(decide(&snapshot), Decision::WaitUntil(Some(500)));
+        // Adding Desktop support must not silently broaden the managed adapter.
+        assert!(parse_response(&desktop, 100).is_err());
+    }
+
+    #[test]
+    fn desktop_unknown_or_denied_ordinary_usage_cannot_be_inferred_from_capacity() {
+        for (permission, expected) in [(Value::Null, None), (json!(false), Some(false))] {
+            let mut value =
+                desktop_response(vec![sample_bucket("codex", 0, json!(50))], permission);
+            let paid_credits = json!({"hasCredits":true,"unlimited":true,"balance":"999"});
+            value["rateLimits"]["credits"] = paid_credits.clone();
+            value["rateLimitsByLimitId"]["codex"]["credits"] = paid_credits;
+            let (snapshot, ordinary) = parse_desktop_response(&value, 100).unwrap();
+            assert!(matches!(decide(&snapshot), Decision::Submit { .. }));
+            assert_eq!(ordinary, expected);
+            assert_ne!(ordinary, Some(true));
+        }
+    }
+
+    #[test]
+    fn desktop_rejects_missing_future_and_mistyped_fields() {
+        let valid = desktop_response(vec![sample_bucket("codex", 0, json!(200))], json!(true));
+        for field in [
+            "ordinaryUsageAllowed",
+            "accountId",
+            "rateLimitUpsell",
+            "rateLimits",
+            "rateLimitsByLimitId",
+        ] {
+            let mut value = valid.clone();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(parse_desktop_response(&value, 100).is_err(), "{field}");
+        }
+        for pointer in ["", "/rateLimits", "/rateLimits/primary"] {
+            let mut value = valid.clone();
+            value.pointer_mut(pointer).unwrap()["futureGate"] = json!(true);
+            assert!(parse_desktop_response(&value, 100).is_err(), "{pointer}");
+        }
+        for pointer in [
+            "/ordinaryUsageAllowed",
+            "/accountId",
+            "/rateLimits/normalModelSlug",
+        ] {
+            for invalid in [json!({}), json!([]), json!(17)] {
+                let mut value = valid.clone();
+                *value.pointer_mut(pointer).unwrap() = invalid;
+                assert!(parse_desktop_response(&value, 100).is_err(), "{pointer}");
+            }
+        }
+        let mut missing_slug = valid;
+        missing_slug["rateLimits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("normalModelSlug");
+        assert!(parse_desktop_response(&missing_slug, 100).is_err());
+    }
+
+    #[test]
+    fn desktop_metadata_is_validated_without_authorization_or_identity_retention() {
+        for metadata in [
+            Value::Null,
+            json!({"banner_type":"purchase","ordinary_usage_allowed":true}),
+            json!([true, 123, "message"]),
+            json!("banner"),
+            json!(false),
+            json!(1),
+        ] {
+            let mut value =
+                desktop_response(vec![sample_bucket("codex", 12, json!(200))], Value::Null);
+            value["accountId"] = json!("fixture-account");
+            value["rateLimitUpsell"] = metadata;
+            value["rateLimits"]["normalModelSlug"] = json!("fixture-model");
+            value["rateLimitsByLimitId"]["codex"]["normalModelSlug"] = json!("fixture-model");
+            let (snapshot, permission) = parse_desktop_response(&value, 100).unwrap();
+            assert_eq!(permission, None);
+            assert_eq!(
+                snapshot,
+                parse_response(&response(vec![sample_bucket("codex", 12, json!(200))]), 100)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_compatibility_comparison_cannot_hide_metadata_or_bucket_differences() {
+        let valid = desktop_response(
+            vec![
+                sample_bucket("codex", 0, json!(200)),
+                sample_bucket("other", 100, json!(400)),
+            ],
+            json!(true),
+        );
+        for (field, changed) in [
+            ("normalModelSlug", json!("different-model")),
+            ("planType", json!("promax")),
+            ("limitId", json!("other")),
+        ] {
+            let mut value = valid.clone();
+            value["rateLimits"][field] = changed;
+            assert!(parse_desktop_response(&value, 100).is_err(), "{field}");
+        }
+        let mut unknown_map_field = valid.clone();
+        unknown_map_field["rateLimitsByLimitId"]["other"]["futureGate"] = json!(true);
+        assert!(parse_desktop_response(&unknown_map_field, 100).is_err());
+        let mut invalid_map_slug = valid.clone();
+        invalid_map_slug["rateLimitsByLimitId"]["other"]["normalModelSlug"] = json!(false);
+        assert!(parse_desktop_response(&invalid_map_slug, 100).is_err());
+        let mut empty = valid;
+        empty["rateLimitsByLimitId"] = json!({});
+        assert!(parse_desktop_response(&empty, 100).is_err());
+    }
+
+    #[test]
+    fn desktop_new_plan_metadata_does_not_change_legacy_or_capacity_rules() {
+        for plan in [
+            "promax",
+            "self_serve_business_prolite",
+            "ent26",
+            "enterprise_cbp_automation",
+            "edu_plus",
+            "edu_pro",
+        ] {
+            let mut bucket = sample_bucket("codex", 100, json!(250));
+            bucket["planType"] = json!(plan);
+            assert!(parse_response(&response(vec![bucket.clone()]), 100).is_err());
+            let (snapshot, ordinary) =
+                parse_desktop_response(&desktop_response(vec![bucket], json!(true)), 100).unwrap();
+            assert_eq!(ordinary, Some(true));
+            assert_eq!(decide(&snapshot), Decision::WaitUntil(Some(250)));
+        }
+        let mut unknown = sample_bucket("codex", 0, json!(200));
+        unknown["planType"] = json!("future-plan");
+        assert!(
+            parse_desktop_response(&desktop_response(vec![unknown], json!(true)), 100).is_err()
+        );
     }
 
     #[test]
@@ -586,7 +849,7 @@ mod tests {
         assert_eq!(
             display.buckets[0].windows,
             vec![QuotaWindowTelemetry {
-                kind: "primary",
+                kind: "primary".into(),
                 duration_mins: Some(300),
                 used_percent: Some(37),
                 resets_at: Some(250),

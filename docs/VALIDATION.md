@@ -4,7 +4,39 @@ Updated 2026-10-20, Asia/Taipei. The managed execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
-## Current implementation and verification status
+## Original Desktop chat bridge — 2026-10-20 source revision
+
+The working tree adds the experimental macOS in-place path described in
+[desktop-bridge.md](desktop-bridge.md). It uses the original Desktop connection
+and chat ID with an explicitly modified, pinned official-source backend. The
+published Alpha installers have **not** been replaced.
+
+| Check | Result and scope |
+| --- | --- |
+| Installed Desktop protocol compatibility | Bundled `0.163.0-alpha.10.2` and release `0.163.0`: all 896 experimental TypeScript definitions match structurally; schema generation only, no account connection |
+| Frontend | Type check, 15 tests and production build passed |
+| AutoResume Rust | 143 unit tests and 2 real-wrapper/fake-backend process tests passed; formatting and all-target Clippy with warnings denied passed |
+| Same-chat transport tests | Existing chat ID preserved; native dynamic tool request/reply and RPC IDs preserved; internal responses hidden; one conditional send; newer native input cancels old preflight; EOF cleans registration |
+| Modified App Server | Compiled locally on macOS ARM64 with Rust 1.99.1; 3 live-failure state tests, 1 launch-argument test, 3 local-model integration tests and 1 Core race test passed |
+| Execution-side integration | A local simulated quota failure continues to completion in the same thread, produces exactly one internal continuation fragment and no fabricated user message; repeated requests, normal completion, unloaded history and parameter overrides are refused |
+| Corrected test fixture | The first integration run had a metadata assertion failure because the third-party mock provider strips internal metadata. The fixture now uses OpenAI serialization against the same local mock, retains and strengthens the assertion, and all 3 tests pass |
+| Multi-instance / persistence gates | Ownership declaration and conditional write share a cross-process SQLite critical section; shared pause is persisted before IPC; known no-send/rejected attempts retain tombstones without blocking later distinct failures; uncertain writes remain blocked |
+| Quota / account display | Desktop continuation requires `ordinaryUsageAllowed = true` and all returned bucket gates; display uses the same Desktop connection, excludes account metadata and clears on account changes |
+| Local app and launcher | Updated macOS ARM64 debug `.app` built, 50.47 MiB; private manual launcher prepared and syntax checked, pins the installed Desktop build; neither app was activated |
+| Reproducibility | Source SHA256, clean patch application, Apache notices and exact local-version lock repair checked; no external dependency versions changed |
+| New-revision macOS / Windows CI | Not yet established by the local results above; the new upstream-backend workflow is manual/PR-triggered and has not been run |
+| Original Desktop live activation / Chrome-CUA-MCP behavior | **Not performed**; native protocol matching is not a substitute |
+| Real account quota exhaustion and restoration | **Not performed**; no new live inference request or existing-chat mutation was issued |
+| Windows activation | Explicitly disabled pending native environment and sandbox validation |
+
+Upstream builds emit existing Rust deprecation and large-unwind-section linker
+warnings. They completed successfully; the AutoResume Clippy gate itself passes.
+This is targeted coverage of the new backend feature, not the entire upstream
+Codex test suite. Compiled runtime and sanitized test logs were retained under
+ignored `work/`; this run's large upstream compilation intermediates were removed
+after verification.
+
+## Previous managed-terminal implementation and verification
 
 The working tree now contains a separate managed path for new tasks opened
 through the application's official Codex terminal. It uses an application-owned

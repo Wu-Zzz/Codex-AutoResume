@@ -1,5 +1,95 @@
 # Codex App Server integration audit
 
+## Current requirement: original Desktop chat, in place
+
+The user's latest requirement supersedes the terminal-only compromise below:
+continue the selected conversation **inside its original Codex Desktop window**.
+A new terminal, a fork, a new conversation or a context migration is not an
+acceptable substitute. The released application does not implement this path.
+
+### 0.163.0 and Desktop entry-point recheck
+
+The official `rust-v0.163.0` release was downloaded into ignored `work/`, and
+its experimental TypeScript schema was generated without accessing an account.
+The official source and the installed macOS Desktop's static entry points were
+inspected read-only. No existing thread was resumed, interrupted or queued;
+Desktop was not restarted and its authentication was not inspected.
+
+- The inspected running Desktop uses its own stdio App Server. Starting another
+  server does not attach to that live instance.
+- An ordinary thread deep link can navigate to a conversation and prefill its
+  composer. Prefilling is not submission.
+- Desktop also has a wake route for conversations with existing queued input.
+  More significantly, the official persistent queue can notify the already-live
+  owner through its external-commit polling. Therefore the earlier general
+  assumption that there is *no route at all* into the original instance is too
+  strong.
+- The queue's execution uses an atomic idle-only start, which avoids steering
+  input into an active turn. It does **not** bind that start to the failed turn
+  that justified automatic continuation.
+
+The decisive regression test is
+[`a_new_turn_preserves_queued_messages_until_it_completes`](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server/tests/suite/v2/thread_queue.rs#L864):
+queued input survives interruption and a newer user turn, then executes after
+that newer turn completes. This is correct for a general message queue, but
+violates this application's requirement to invalidate a quota continuation
+after user stop or newer work.
+
+Other relevant evidence:
+
+- [`ThreadQueueAddParams` and related queue requests](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server-protocol/src/protocol/v2/thread.rs#L935)
+  have no expected-previous-turn or quota-failure precondition.
+- [Queue service](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/ext/queue/src/service.rs#L89)
+  observes external commits and can dispatch queued input automatically. Enqueue
+  is already an execution-enabling operation, not a harmless draft step.
+- [Queue insertion](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/state/src/runtime/queued_items.rs#L77)
+  creates a new item ID for every enqueue; `clientUserMessageId` is not a
+  deduplication key.
+- The core already provides
+  [`continue_turn_if_idle` with an expected previous turn](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/src/codex_thread.rs#L453).
+  Ordinary public turn start and queue dispatch do not expose that full guard.
+
+An external preflight followed by enqueue does not close the gap: the user can
+act between those operations or before dispatch. A later queue deletion can race
+with dispatch in the original server. Neither polling nor a lock in AutoResume
+can make that check atomic in the Desktop owner.
+
+### Implemented experimental execution-side support
+
+The persistent queue was rejected for this automatic path. The source now adds
+a transparent stdio bridge through Desktop's statically verified
+`CODEX_CLI_PATH` entry point, plus an explicit modified-source extension to the
+official 0.163.0 App Server. The original Desktop loads the original chat and
+continues to handle native tool/approval traffic.
+
+The distinct `turn/continueIfFailed` RPC accepts only a thread ID and expected
+failed-turn ID. Its live evidence and configuration checks delegate final
+reservation to Core's atomic `continue_turn_if_idle`. It cannot steer, enqueue,
+or cold-resume. The bridge queries `autoresume/capabilities` and refuses to fall
+back to normal `turn/start` when unsupported. Both extension methods are
+project additions, **not official public protocol guarantees**.
+
+The installed Desktop's bundled `0.163.0-alpha.10.2` and official release
+`0.163.0` produced 896 experimental TypeScript definitions each; all matched
+structurally after removing comments/whitespace. Only `generate-ts` and version
+commands were used. This is schema compatibility evidence, not validation of
+Chrome/CUA, native helpers, MCP behavior or real-account execution.
+
+The preparer checks the audited CLI version and pins the installed Desktop
+build in its manual launcher. An application update requires a fresh check.
+The Windows override changes native sandbox/runtime setup, so activation there
+is refused. No installed Desktop application, official database, auth file or
+rollout was modified, and no existing chat was resumed or interrupted in this
+development run.
+
+The source and reproducible patch are described in
+[desktop-bridge.md](desktop-bridge.md) and
+[the integration package](../integrations/codex/README.md). The published Alpha
+still has the older capabilities. Real Desktop activation and real quota
+recovery remain separate acceptance steps.
+
+## Previous managed-terminal audit
+
 Checked 2026-10-20 (Asia/Taipei). Installed executable: `codex-cli 0.145.0`.
 The managed execution revision below is **in progress**: final adversarial review,
 packaged native checks and release validation have not yet closed. Current local

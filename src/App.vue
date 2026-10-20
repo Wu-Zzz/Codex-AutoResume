@@ -58,6 +58,7 @@ watch(filteredTasks, tasks => {
   if (!tasks.some(task => task.id === selectedTaskId.value)) selectedTaskId.value = tasks[0]?.id ?? ''
 })
 const connected = computed(() => snapshot.value.connection === 'ready')
+const desktopChatsConnected = computed(() => snapshot.value.tasks.some(task => task.mode === 'desktop'))
 const connectionLabel = computed(() => demo ? '预览模式' : ({
   checking: '正在连接', ready: '已连接', missing: '未连接', error: '连接异常', login_required: '需要登录',
 })[snapshot.value.connection])
@@ -265,7 +266,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <div class="capability-bar">
-      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">已有会话仅监测</button>
+      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">{{ desktopChatsConnected ? '原聊天续跑 · 实验连接' : '普通连接仅监测已有会话' }}</button>
       <span v-if="snapshot.pausedAll" class="paused-label" role="status">已全部暂停</span>
     </div>
     <div v-if="error && !candidatesDialog?.open && !connectionDialog?.open" class="error-notice" role="alert"><p>{{ error }}</p><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><img :src="closeIcon" alt=""/></button></div>
@@ -280,7 +281,7 @@ onBeforeUnmount(() => {
             <button :class="{ active: taskFilter === 'needs_attention' }" :aria-pressed="taskFilter === 'needs_attention'" @click="taskFilter = 'needs_attention'">需处理 {{ attentionCount }}</button>
           </div>
         </template>
-        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>{{ snapshot.tasks.filter(task => task.mode === 'managed').length }} 个托管</span></div>
+        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>{{ snapshot.tasks.filter(task => task.mode !== 'monitor').length }} 个可续跑</span></div>
         <div v-if="loading" class="empty-state" aria-live="polite"><span class="spinner" aria-hidden="true"/><p>正在连接 Codex…</p></div>
         <div v-else-if="!snapshot.tasks.length" class="empty-state"><span class="empty-mark" aria-hidden="true">＋</span><h2>暂无任务</h2><p>从添加任务开始</p></div>
         <div v-else-if="!filteredTasks.length" class="empty-state"><p>没有匹配的任务</p></div>
@@ -314,7 +315,7 @@ onBeforeUnmount(() => {
     </dialog>
     <dialog ref="capabilityDialog" class="dialog capability-dialog" aria-labelledby="capability-title" @close="restoreFocus">
       <div class="dialog-header"><h2 id="capability-title">续跑范围</h2><button class="icon-button" aria-label="关闭能力说明" autofocus @click="capabilityDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
-      <p class="dialog-description">从本工具新建的任务在官方终端中运行，单独授权后可等待额度并续跑。已有 Desktop 或终端会话只做监测，不会自动接管。</p>
+      <p class="dialog-description">原聊天通过实验桌面连接接入后，会出现在任务列表中。单独开启开关，才会在本次连接确认额度中断后原地续跑。普通历史列表仍仅监测。</p>
       <p class="capability-reason">{{ snapshot.compatibilityMessage || '托管续跑仍处于测试阶段。遇到审批、用户停止或执行状态不明时会暂停，等待你处理。' }}</p>
     </dialog>
     <dialog ref="candidatesDialog" class="dialog candidate-dialog" aria-labelledby="candidate-title" @close="restoreFocus">

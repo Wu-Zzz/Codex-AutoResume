@@ -18,7 +18,7 @@ const dot = computed(() => ({
 }[props.task.state] ?? grayDot))
 const hint = computed(() => {
   if (props.pausedAll) return '全局已暂停'
-  if (!props.task.enabled) return props.task.mode === 'managed' ? '续跑已关闭' : '监测已关闭'
+  if (!props.task.enabled) return props.task.mode !== 'monitor' ? '续跑已关闭' : '监测已关闭'
   if (props.task.state === 'waiting_quota') return props.task.resetsAt === null ? '重置时间未知' : `${formatTime(props.task.resetsAt, true)} 后核对`
   return ''
 })
@@ -28,13 +28,13 @@ const hint = computed(() => {
   <article class="task-card" :class="[task.state, { selected }]" :data-task-id="task.id">
     <button class="task-card-content" :aria-label="`查看${task.title || '未命名任务'}详情`" :aria-pressed="selected" @click="$emit('select')">
       <strong class="task-name" :title="task.title">{{ task.title || '未命名任务' }}</strong>
-      <span class="task-project"><img :src="folder" alt=""/><span :title="task.cwd">{{ projectName(task.cwd) }}</span><span class="task-mode">{{ task.mode === 'managed' ? '托管' : '仅监测' }}</span></span>
+      <span class="task-project"><img :src="folder" alt=""/><span :title="task.cwd">{{ projectName(task.cwd) }}</span><span class="task-mode">{{ task.mode === 'desktop' ? '原聊天 · 实验' : task.mode === 'managed' ? '终端托管' : '仅监测' }}</span></span>
       <span class="task-state-row">
         <span class="status-label" :class="task.state"><img :src="dot" alt=""/>{{ stateLabel(task.state) }}</span>
         <span class="task-hint" :title="hint">{{ hint }}</span>
       </span>
     </button>
-    <button class="switch" :class="{ on: task.enabled }" role="switch" :aria-checked="task.enabled" :aria-label="`${task.title}${task.mode === 'managed' ? '自动续跑' : '监测'}`" aria-describedby="capability-status" :title="task.canEnable === false ? task.detail : `${task.enabled ? '关闭' : '开启'}${task.mode === 'managed' ? '自动续跑' : '任务监测'}`" :disabled="busy || (!task.enabled && task.canEnable === false)" @click="$emit('toggle')">
+    <button class="switch" :class="{ on: task.enabled }" role="switch" :aria-checked="task.enabled" :aria-label="`${task.title}${task.mode !== 'monitor' ? '自动续跑' : '监测'}`" aria-describedby="capability-status" :title="task.canEnable === false ? task.detail : `${task.enabled ? '关闭' : '开启'}${task.mode !== 'monitor' ? '自动续跑' : '任务监测'}`" :disabled="busy || (!task.enabled && task.canEnable === false)" @click="$emit('toggle')">
       <img v-if="task.enabled" :src="switchOn" alt=""/>
       <span v-else class="switch-off" aria-hidden="true"><span/></span>
     </button>

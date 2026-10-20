@@ -299,6 +299,34 @@ impl Store {
         Ok(())
     }
 
+    /// Finalize a claimed attempt only when the caller has positive evidence
+    /// that no turn was submitted: a pre-write cancellation or a strict
+    /// rejection from the matching, still-current conditional request.
+    /// Never use this for a write error, timeout or late reply.
+    /// The tombstone remains, so this failed turn can never be submitted again.
+    pub fn mark_not_submitted(
+        &mut self,
+        thread_id: &str,
+        failed_turn_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let intent = read_intent(&transaction, thread_id, failed_turn_id)?
+            .ok_or(StoreError::IntentNotFound)?;
+        if intent.status != IntentStatus::Claimed || intent.remote_turn_id.is_some() {
+            return Err(StoreError::ConflictingResult);
+        }
+        transaction.execute(
+            "UPDATE submission_intents SET status = 'reconciled', updated_at = ?3
+                WHERE thread_id = ?1 AND failed_turn_id = ?2",
+            params![thread_id, failed_turn_id, now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn mark_ambiguous(
         &mut self,
         thread_id: &str,
@@ -893,5 +921,49 @@ mod tests {
             .unwrap();
         assert_eq!(completed.state, TaskState::Completed);
         assert_eq!(evaluate(&completed, &quota, 502, &safety), Decision::Noop);
+    }
+    #[test]
+    fn confirmed_no_submission_keeps_tombstone_but_allows_a_new_failure() {
+        let db = TestDb::new();
+        let mut store = db.open();
+        store.save_task(&eligible()).unwrap();
+        store.claim_submission("thread", "failed", 101).unwrap();
+        store.mark_not_submitted("thread", "failed", 102).unwrap();
+        assert!(matches!(
+            store.claim_submission("thread", "failed", 103).unwrap(),
+            ClaimResult::Existing(_)
+        ));
+        let mut next = eligible();
+        observe_turn(&mut next, &failed_turn("different-failure"), 104);
+        store.save_task(&next).unwrap();
+        assert!(matches!(
+            store
+                .claim_submission("thread", "different-failure", 105)
+                .unwrap(),
+            ClaimResult::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn no_submission_evidence_cannot_override_ambiguous_or_confirmed_delivery() {
+        for ambiguous in [true, false] {
+            let db = TestDb::new();
+            let mut store = db.open();
+            store.save_task(&eligible()).unwrap();
+            store.claim_submission("thread", "failed", 101).unwrap();
+            if ambiguous {
+                store.mark_ambiguous("thread", "failed", 102).unwrap();
+            } else {
+                store
+                    .mark_submitted("thread", "failed", "remote-turn", 102)
+                    .unwrap();
+            }
+            let before = store.get_intent("thread", "failed").unwrap();
+            assert!(matches!(
+                store.mark_not_submitted("thread", "failed", 103),
+                Err(StoreError::ConflictingResult)
+            ));
+            assert_eq!(store.get_intent("thread", "failed").unwrap(), before);
+        }
     }
 }

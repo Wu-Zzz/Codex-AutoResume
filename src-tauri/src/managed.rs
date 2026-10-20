@@ -1140,7 +1140,7 @@ impl Core {
 
     fn update_telemetry(&mut self, result: &Value) {
         self.telemetry = quota::parse_telemetry(result, now()).map(|mut telemetry| {
-            telemetry.source = "managed";
+            telemetry.source = "managed".into();
             telemetry
         });
     }
