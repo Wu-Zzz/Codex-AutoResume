@@ -2,7 +2,7 @@
 
 为本地 Codex 任务等待额度恢复的轻量桌面助手。面向 macOS 和 Windows，Tauri 2 + Vue 3 + Rust + SQLite。
 
-**正在实现托管任务自动续跑，尚未发布 Release。** 使用方式是：选择项目 → 打开官方 Codex 终端 → 明确开启自动续跑。已有 Desktop / CLI 对话只监测，不能透明接管。
+**Alpha：为从工具启动的新任务提供自动续跑。** 使用方式是：选择项目 → 打开官方 Codex 终端 → 明确开启自动续跑。已有 Desktop / CLI 对话只监测，不能透明接管。
 
 实际执行链路使用独立的官方 Codex 运行目录和存活进程，待额度恢复后在原会话提交继续请求。模拟验证、真实账号只读检查、真实额度恢复、Windows 实机验收分别记录在[验证记录](docs/VALIDATION.md)；实现代码不等于已完成全部实机验收。
 
@@ -21,7 +21,9 @@
 
 ## 下载与 Release
 
-本轮先补齐核心功能并验证，再发布到 [GitHub Releases](https://github.com/Wu-Zzz/Codex-AutoResume/releases)。预定安装格式：Mac Apple Silicon / Intel 为 `.dmg`，Windows x64 为 `.exe`（NSIS），不是 `.dwg`。发布前文档中的安装包名称仅为计划产物。
+安装包见 [GitHub Releases](https://github.com/Wu-Zzz/Codex-AutoResume/releases)。Mac Apple Silicon / Intel 为 `.dmg`，Windows x64 为 `.exe`（NSIS）。只有三个安装包都通过构建和包装检查，发布流程才会公开该版本。
+
+已通过一次真实隔离任务执行；真实额度耗尽后的自动恢复和 Windows 实机操作仍未验证。请按 Alpha 版本使用，完整范围见[验证记录](docs/VALIDATION.md)。
 
 macOS 目前使用 ad-hoc 签名，未完成 Developer ID 签名和公证；Windows 没有代码签名。应用不附带官方 Codex CLI。防休眠、Git 分支检查、Webhook、自动安装 CLI、自启动暂未实现。
 

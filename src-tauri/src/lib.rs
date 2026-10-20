@@ -130,7 +130,12 @@ async fn launch_managed(
 ) -> Result<String, String> {
     let spec = state.managed.start(cwd, auto_resume).await?;
     let directory = app.path().app_data_dir().map_err(|_| "无法读取应用目录")?;
-    if let Err(error) = terminal::open(&spec, &directory).await {
+    let launch_result = async {
+        terminal::open(&spec, &directory).await?;
+        state.managed.confirm_launch(&spec.id).await
+    }
+    .await;
+    if let Err(error) = launch_result {
         let _ = state.managed.remove(&spec.id).await;
         return Err(error);
     }

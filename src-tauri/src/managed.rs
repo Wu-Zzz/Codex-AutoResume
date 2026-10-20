@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RETIRED_READS: usize = 256;
 const CONTINUE: &str = "继续刚才因额度限制中断的原任务。先核对上一步执行状态，保持原任务范围、权限和配置；如需审批或补充信息，请停下等待用户。";
 pub const TOKEN_ENV: &str = "CODEX_AUTORESUME_CHANNEL_TOKEN";
 
@@ -105,6 +106,7 @@ impl ManagedTaskView {
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Control {
+    LaunchConfirmed,
     View(Reply<ManagedTaskView>),
     Enable(bool, Reply<()>),
     Pause(bool, Reply<()>),
@@ -258,6 +260,14 @@ impl ManagedHub {
         Ok(views)
     }
 
+    pub async fn confirm_launch(&self, id: &str) -> Result<(), String> {
+        self.handle(id)
+            .await?
+            .send(Control::LaunchConfirmed)
+            .await
+            .map_err(|_| "托管连接已结束".into())
+    }
+
     pub async fn set_auto_resume(&self, id: &str, enabled: bool) -> Result<(), String> {
         let handle = self.handle(id).await?;
         let (reply, recv) = oneshot::channel();
@@ -332,6 +342,24 @@ enum Purpose {
         failed: String,
     },
 }
+
+impl Purpose {
+    fn is_read_only(&self) -> bool {
+        match self {
+            Self::Client { method, .. } => read_only_client_method(method),
+            // StartAccount sends only account/read. A late reply must never
+            // trigger the thread/start that its timed-out caller was awaiting.
+            Self::StartAccount { .. }
+            | Self::Account
+            | Self::Quota
+            | Self::TelemetryAccount
+            | Self::Telemetry
+            | Self::Check { .. } => true,
+            Self::Continue { .. } => false,
+        }
+    }
+}
+
 struct Pending {
     purpose: Purpose,
     deadline: Instant,
@@ -348,6 +376,7 @@ struct Core {
     meta: Option<ManagedMetadata>,
     initial_consent: bool,
     pending: HashMap<String, Pending>,
+    retired_reads: VecDeque<String>,
     server_requests: HashSet<String>,
     client_epoch: Option<String>,
     initialize_result: Option<Value>,
@@ -356,6 +385,7 @@ struct Core {
     initialized: bool,
     created: bool,
     valid: bool,
+    launch_detail: String,
     revision: u64,
     next_id: u64,
     quota: Option<QuotaSnapshot>,
@@ -377,6 +407,7 @@ impl Core {
             meta: None,
             initial_consent,
             pending: HashMap::new(),
+            retired_reads: VecDeque::new(),
             server_requests: HashSet::new(),
             client_epoch: None,
             initialize_result: None,
@@ -385,6 +416,7 @@ impl Core {
             initialized: false,
             created: false,
             valid: true,
+            launch_detail: "正在打开官方 Codex 终端".into(),
             revision: 0,
             next_id: 1,
             quota: None,
@@ -409,6 +441,7 @@ impl Core {
 
     fn revoke(&mut self, reason: &str) {
         self.valid = false;
+        self.launch_detail = reason.into();
         self.initial_consent = false;
         self.revision += 1;
         self.quota = None;
@@ -428,6 +461,7 @@ impl Core {
     }
 
     fn pause(&mut self, reason: &str) {
+        self.launch_detail = reason.into();
         self.initial_consent = false;
         self.revision += 1;
         self.quota = None;
@@ -444,6 +478,13 @@ impl Core {
             task.failed_turn_id = None;
             task.resets_at = None;
             task.set_status(TaskState::Paused, reason, now());
+        }
+    }
+
+    fn confirm_launch(&mut self) {
+        // A pause or disconnect that occurred during startup takes precedence.
+        if self.valid && self.revision == 0 {
+            self.launch_detail = "终端已启动，请完成官方登录并输入任务".into();
         }
     }
 
@@ -468,16 +509,15 @@ impl Core {
             connected: self.client_epoch.is_some(),
             can_enable: false,
             state: if self.valid {
-                TaskState::Monitoring
+                TaskState::Reconciling
             } else {
                 TaskState::NeedsAttention
             },
-            detail: if self.valid {
-                "请在官方 Codex 终端登录并开始任务"
+            detail: if self.valid && self.client_epoch.is_some() {
+                "官方终端已连接，等待开始任务".into()
             } else {
-                "托管连接已结束，请启动新任务"
-            }
-            .into(),
+                self.launch_detail.clone()
+            },
             resets_at: None,
             events: vec![],
             quota: self.telemetry.clone(),
@@ -765,6 +805,12 @@ impl Core {
             return Ok(vec![]);
         };
         let Some(pending) = self.pending.remove(id) else {
+            if let Some(index) = self.retired_reads.iter().position(|retired| retired == id) {
+                // The caller already received its timeout. Consume this exact
+                // ID once and discard every stale field without changing gates.
+                self.retired_reads.remove(index);
+                return Ok(vec![]);
+            }
             self.revoke("Codex 返回了无法匹配的响应，已停止自动续跑");
             return Ok(vec![]);
         };
@@ -1257,6 +1303,14 @@ impl Core {
         let mut actions = vec![];
         for id in expired {
             let pending = self.pending.remove(&id).unwrap();
+            if pending.purpose.is_read_only() {
+                // Bound memory across long-lived sessions. An evicted ID is
+                // unknown again and therefore retains the fail-closed default.
+                if self.retired_reads.len() == MAX_RETIRED_READS {
+                    self.retired_reads.pop_front();
+                }
+                self.retired_reads.push_back(id);
+            }
             match pending.purpose {
                 Purpose::Continue { failed } => {
                     if let Some(task) = &self.task {
@@ -1535,29 +1589,16 @@ fn warm_resume_matches(params: &Value, initial: Option<&Value>) -> bool {
             && (value.is_null() || initial.get(key) == Some(value)))
     })
 }
-fn allowed_client_method(method: &str) -> bool {
+fn read_only_client_method(method: &str) -> bool {
     matches!(
         method,
-        "thread/start"
-            | "thread/resume"
-            | "thread/read"
+        "thread/read"
             | "thread/list"
             | "thread/loaded/list"
             | "thread/turns/list"
             | "thread/items/list"
-            | "thread/unsubscribe"
-            | "thread/name/set"
-            | "turn/start"
-            | "turn/steer"
-            | "turn/interrupt"
-            | "thread/settings/update"
             | "thread/goal/get"
-            | "thread/goal/set"
-            | "thread/goal/clear"
             | "account/read"
-            | "account/login/start"
-            | "account/login/cancel"
-            | "account/logout"
             | "account/rateLimits/read"
             | "model/list"
             | "modelProvider/capabilities/read"
@@ -1568,7 +1609,6 @@ fn allowed_client_method(method: &str) -> bool {
             | "skills/list"
             | "hooks/list"
             | "mcpServerStatus/list"
-            | "mcpServer/oauth/login"
             | "app/list"
             | "app/read"
             | "plugin/list"
@@ -1579,6 +1619,27 @@ fn allowed_client_method(method: &str) -> bool {
             | "fs/getMetadata"
             | "fs/readDirectory"
     )
+}
+
+fn allowed_client_method(method: &str) -> bool {
+    read_only_client_method(method)
+        || matches!(
+            method,
+            "thread/start"
+                | "thread/resume"
+                | "thread/unsubscribe"
+                | "thread/name/set"
+                | "turn/start"
+                | "turn/steer"
+                | "turn/interrupt"
+                | "thread/settings/update"
+                | "thread/goal/set"
+                | "thread/goal/clear"
+                | "account/login/start"
+                | "account/login/cancel"
+                | "account/logout"
+                | "mcpServer/oauth/login"
+        )
 }
 fn known_notification(method: &str) -> bool {
     matches!(
@@ -1728,6 +1789,7 @@ async fn run_actor(
         let actions: Result<Vec<Action>, String> = tokio::select! {
             command = controls.recv() => {
                 match command {
+                    Some(Control::LaunchConfirmed) => core.confirm_launch(),
                     Some(Control::View(reply)) => { let _ = reply.send(Ok(core.view())); }
                     Some(Control::Enable(enabled, reply)) => { let _ = reply.send(core.enable(enabled)); }
                     Some(Control::Pause(is_paused, reply)) => {
@@ -1827,6 +1889,7 @@ async fn wait_for_client(
                 }
             }
             command = controls.recv() => match command {
+                Some(Control::LaunchConfirmed) => core.confirm_launch(),
                 Some(Control::View(reply)) => { let _ = reply.send(Ok(core.view())); }
                 Some(Control::Enable(_, reply)) => { let _ = reply.send(Err("请先在官方终端开始任务".into())); }
                 Some(Control::Pause(_, reply)) => { let _ = reply.send(Ok(())); }
@@ -1840,6 +1903,7 @@ async fn wait_for_client(
 async fn dead_actor(core: Core, mut controls: mpsc::Receiver<Control>) {
     while let Some(command) = controls.recv().await {
         match command {
+            Control::LaunchConfirmed => {}
             Control::View(reply) => {
                 let _ = reply.send(Ok(core.view()));
             }
@@ -1995,7 +2059,7 @@ mod tests {
         })
     }
 
-    fn fixture(consent: bool) -> (tempfile::TempDir, Core) {
+    fn launch_fixture(consent: bool) -> (tempfile::TempDir, Core) {
         let dir = tempfile::tempdir().unwrap();
         let spec = LaunchSpec {
             id: Uuid::new_v4().to_string(),
@@ -2007,11 +2071,16 @@ mod tests {
             codex_home: dir.path().join("private-codex"),
             thread_id: None,
         };
-        let mut core = Core::new(
+        let core = Core::new(
             spec,
             consent,
             Store::open(dir.path().join("state.db")).unwrap(),
         );
+        (dir, core)
+    }
+
+    fn fixture(consent: bool) -> (tempfile::TempDir, Core) {
+        let (dir, mut core) = launch_fixture(consent);
         core.client_epoch = Some("native".into());
         core.initialized = true;
         core.initialize_result = Some(json!({"userAgent":"fixture"}));
@@ -2020,6 +2089,35 @@ mod tests {
         core.created(&configuration("owned-thread", dir.path()))
             .unwrap();
         (dir, core)
+    }
+
+    #[test]
+    fn failed_startup_cannot_be_reactivated_by_late_launch_confirmation() {
+        let (_dir, mut core) = launch_fixture(true);
+        assert!(!core.view().can_enable);
+        core.confirm_launch();
+        assert!(!core.view().can_enable);
+        core.revoke("启动失败，未建立托管连接");
+        core.confirm_launch();
+        let view = core.view();
+        assert_eq!(view.state, TaskState::NeedsAttention);
+        assert_eq!(view.detail, "启动失败，未建立托管连接");
+        assert!(!view.auto_resume);
+        assert!(!view.connected);
+        assert!(!view.can_enable);
+        assert!(core.enable(true).is_err());
+        assert!(core.task.is_none());
+        assert!(core.pending.is_empty());
+    }
+
+    #[test]
+    fn late_launch_confirmation_preserves_a_pre_thread_disconnect_reason() {
+        let (_dir, mut core) = launch_fixture(true);
+        core.pause("官方终端已断开，自动续跑已关闭");
+        core.confirm_launch();
+        assert_eq!(core.view().detail, "官方终端已断开，自动续跑已关闭");
+        assert!(!core.view().auto_resume);
+        assert!(!core.view().can_enable);
     }
 
     fn turn(id: &str, status: &str, code: Option<&str>) -> Value {
@@ -2087,6 +2185,204 @@ mod tests {
     }
     fn client_error(actions: Vec<Action>) -> bool {
         matches!(actions.as_slice(), [Action::Client(v)] if v.get("error").is_some())
+    }
+
+    fn expire_request(core: &mut Core, request: &Value) -> Vec<Action> {
+        core.pending
+            .get_mut(request["id"].as_str().unwrap())
+            .unwrap()
+            .deadline = Instant::now() - Duration::from_secs(1);
+        core.next_check = i64::MAX;
+        core.next_telemetry = i64::MAX;
+        core.tick(false).unwrap()
+    }
+
+    #[test]
+    fn late_client_reads_are_discarded_once_without_changing_consent_or_observations() {
+        for method in [
+            "model/list",
+            "app/list",
+            "mcpServerStatus/list",
+            "account/read",
+            "account/rateLimits/read",
+        ] {
+            let (_dir, mut core) = fixture(true);
+            let slot = Arc::new(Semaphore::new(1));
+            core.account_chatgpt = true;
+            core.quota = Some(quota::parse_response(&quota_response(100), now()).unwrap());
+            core.update_telemetry(&quota_response(100));
+            let request = backend_request(
+                core.client("native", json!({"id":7,"method":method,"params":{}})),
+                method,
+            );
+            assert!(client_error(expire_request(&mut core, &request)));
+            let task = core.task.clone();
+            let quota = core.quota.clone();
+            let telemetry = core.telemetry.clone();
+            let result = if method == "account/read" {
+                json!({"account":{"type":"apiKey"}})
+            } else {
+                quota_response(0)
+            };
+            assert!(respond(&mut core, &request, result.clone(), &slot).is_empty());
+            assert!(core.valid);
+            assert!(core.initial_consent);
+            assert!(core.account_chatgpt);
+            assert_eq!(core.task, task);
+            assert_eq!(core.quota, quota);
+            assert_eq!(core.telemetry, telemetry);
+            assert!(core.retired_reads.is_empty());
+            // A second response is a duplicate, not another exempt late read.
+            assert!(respond(&mut core, &request, result, &slot).is_empty());
+            assert!(!core.valid);
+            assert!(!core.view().auto_resume);
+        }
+    }
+
+    #[test]
+    fn late_internal_reads_cannot_supply_quota_or_trigger_a_continuation() {
+        let cases = [
+            ("account/read", Purpose::Account),
+            ("account/read", Purpose::TelemetryAccount),
+            ("account/rateLimits/read", Purpose::Quota),
+            ("account/rateLimits/read", Purpose::Telemetry),
+            (
+                "thread/read",
+                Purpose::Check {
+                    failed: "failed-1".into(),
+                    revision: 0,
+                },
+            ),
+        ];
+        for (method, purpose) in cases {
+            let (_dir, mut core) = fixture(true);
+            let slot = Arc::new(Semaphore::new(1));
+            terminal(&mut core, "failed", Some("usageLimitExceeded"));
+            core.quota = Some(quota::parse_response(&quota_response(0), now()).unwrap());
+            core.update_telemetry(&quota_response(100));
+            let request = backend_request(vec![core.request(method, json!({}), purpose)], method);
+            assert!(expire_request(&mut core, &request).is_empty());
+            let quota = core.quota.clone();
+            let telemetry = core.telemetry.clone();
+            let revision = core.revision;
+            let result = match method {
+                "account/read" => json!({"account":{"type":"chatgpt"}}),
+                "thread/read" => matching_history(),
+                _ => quota_response(0),
+            };
+            assert!(respond(&mut core, &request, result, &slot).is_empty());
+            assert!(core.valid);
+            assert!(core.view().auto_resume);
+            assert_eq!(core.revision, revision);
+            assert_eq!(core.quota, quota);
+            assert_eq!(core.telemetry, telemetry);
+            assert!(!core.account_chatgpt);
+            assert!(core.pending.is_empty());
+            assert!(core
+                .store
+                .get_intent("owned-thread", "failed-1")
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn expired_start_account_read_never_starts_a_deferred_thread() {
+        let (_dir, mut core) = launch_fixture(true);
+        core.client_epoch = Some("native".into());
+        core.initialized = true;
+        let request = backend_request(
+            core.client(
+                "native",
+                json!({"id":7,"method":"thread/start","params":{}}),
+            ),
+            "account/read",
+        );
+        assert!(client_error(expire_request(&mut core, &request)));
+        assert!(respond(
+            &mut core,
+            &request,
+            json!({"account":{"type":"chatgpt"}}),
+            &Arc::new(Semaphore::new(1))
+        )
+        .is_empty());
+        assert!(!core.created);
+        assert!(!core.initial_consent);
+        assert!(!core.account_chatgpt);
+        assert!(core.task.is_none());
+        assert!(core.pending.is_empty());
+    }
+
+    #[test]
+    fn late_mutations_and_unknown_response_ids_remain_fail_closed() {
+        for method in [
+            "initialize",
+            "account/login/start",
+            "account/logout",
+            "thread/settings/update",
+            "thread/start",
+            "thread/resume",
+            "turn/start",
+            "turn/steer",
+            "mcpServer/oauth/login",
+            "future/read",
+        ] {
+            let (_dir, mut core) = fixture(true);
+            let request = backend_request(
+                vec![core.request(
+                    method,
+                    json!({}),
+                    Purpose::Client {
+                        epoch: "native".into(),
+                        original_id: json!(7),
+                        method: method.into(),
+                    },
+                )],
+                method,
+            );
+            assert!(client_error(expire_request(&mut core, &request)));
+            assert!(core.retired_reads.is_empty());
+            assert!(
+                respond(&mut core, &request, json!({}), &Arc::new(Semaphore::new(1))).is_empty()
+            );
+            assert!(!core.valid);
+            assert!(!core.view().auto_resume);
+            assert!(core.enable(true).is_err());
+        }
+        let (_dir, mut core) = fixture(true);
+        let unknown_id = format!("ar:{}:999999", core.spec.id);
+        assert!(core
+            .backend(
+                json!({"id":unknown_id,"result":{}}),
+                false,
+                &Arc::new(Semaphore::new(1))
+            )
+            .unwrap()
+            .is_empty());
+        assert!(!core.valid);
+    }
+
+    #[test]
+    fn retired_reads_are_bounded_and_evicted_ids_remain_unknown() {
+        let (_dir, mut core) = fixture(true);
+        let mut requests = vec![];
+        for _ in 0..=MAX_RETIRED_READS {
+            let request = backend_request(
+                vec![core.request("account/rateLimits/read", json!({}), Purpose::Telemetry)],
+                "account/rateLimits/read",
+            );
+            assert!(expire_request(&mut core, &request).is_empty());
+            assert!(core.retired_reads.len() <= MAX_RETIRED_READS);
+            requests.push(request);
+        }
+        assert_eq!(core.retired_reads.len(), MAX_RETIRED_READS);
+        let slot = Arc::new(Semaphore::new(1));
+        assert!(respond(&mut core, requests.last().unwrap(), json!({}), &slot).is_empty());
+        assert!(core.valid);
+        assert_eq!(core.retired_reads.len(), MAX_RETIRED_READS - 1);
+        assert!(respond(&mut core, &requests[0], json!({}), &slot).is_empty());
+        assert!(!core.valid);
+        assert!(!core.view().auto_resume);
     }
 
     #[test]
@@ -2231,6 +2527,26 @@ mod tests {
         assert_eq!(intent.status, crate::store::IntentStatus::Ambiguous);
         assert!(!core.valid);
         assert!(core.enable(true).is_err());
+        assert!(!core
+            .retired_reads
+            .iter()
+            .any(|id| Some(id.as_str()) == send["id"].as_str()));
+        assert!(respond(
+            &mut core,
+            &send,
+            json!({"turn":turn("late-accepted", "inProgress", None)}),
+            &slot
+        )
+        .is_empty());
+        assert!(!core.valid);
+        assert!(core.tick(false).unwrap().is_empty());
+        assert_eq!(
+            core.store
+                .get_intent("owned-thread", "failed-1")
+                .unwrap()
+                .unwrap(),
+            intent
+        );
         let hub = ManagedHub::open(dir.path(), &dir.path().join("state.db")).unwrap();
         drop(hub);
         let store = Store::open(dir.path().join("state.db")).unwrap();

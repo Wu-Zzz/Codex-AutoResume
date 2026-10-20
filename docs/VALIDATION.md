@@ -1,6 +1,6 @@
 # Validation record
 
-Updated 2026-10-20, Asia/Taipei. The managed execution revision is **in progress**.
+Updated 2026-10-20, Asia/Taipei. The managed execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
@@ -25,13 +25,13 @@ over unrelated sessions. Independent source review and local macOS packaging che
 | Theme and quota presentation | Browser checks passed for the current theme/real-versus-demo presentation and quota views |
 | Connection regression tests | Fixture checks passed for RPC rejection versus transport failure, immediate bad-connection cleanup and isolation of individual history failures |
 | Strict quota parser and separate display telemetry | Targeted parser/scheduler checks passed; display unknowns remain unknown and cannot authorize execution |
-| Integrated Rust tests | 80 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
+| Integrated Rust tests | 92 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
 | Rust formatting and Clippy | Passed; Clippy covered all targets with warnings denied |
-| Current macOS ARM64 application and DMG | Rebuilt with the corrected Mac icon: app 14.57 MiB, DMG 4.63 MiB; strict ad-hoc signature and disk-image integrity checks passed |
-| Last completed macOS/Windows CI | [Run 39404011614](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39404011614), commit `a60bfd958f5b01bdb66047647a396281fc439312`, both macOS and Windows passed all tests, static checks and release application compilation; predates the icon correction and is not a published release |
-| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled and tested in current Windows CI; real-machine terminal/login GUI verification still required |
-| Authorized isolated terminal launch | Official terminal opened from the application for `work/live-smoke`, with automatic continuation off; login/input handoff pending and no model prompt sent |
-| Real managed model inference | **Not performed** |
+| Current macOS ARM64 application and DMG | Rebuilt with the icon, terminal-startup and late-read corrections: app 14.55 MiB, DMG 4.63 MiB; strict ad-hoc signature and disk-image integrity checks passed |
+| Last completed macOS/Windows CI | [Run 39423839950](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39423839950), commit `5dc890cbbe5c276e569a7b7faebfa9a77e1b1990`, both macOS and Windows passed all tests, static checks and release application compilation; predates the terminal-startup and late-read corrections |
+| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled in the earlier Windows CI above; the final revision needs its own packaging pipeline checks. Real-machine terminal/login GUI verification still required |
+| Authorized isolated terminal launch | Fresh native attempt confirmed script startup, followed by the user's official login and one isolated request; automatic continuation remained off |
+| Real managed model inference | One authorized isolated request completed: user reported `AUTORESUME_SMOKE_OK`, native UI showed the running-to-completed transition, and the application database recorded a completed turn with zero automatic submission intents |
 | Real quota exhaustion and automatic recovery | **Not performed** |
 | Signing/notarization and fresh-machine acceptance | Not established for this revision |
 
@@ -79,16 +79,71 @@ exhaustion, or resuming or interrupting existing conversations.
 
 The application opened the official terminal for that isolated directory.
 Automatic continuation remained off. The computer-use tool denied control of
-the native Terminal application, so the test is pending a user handoff for
-official login and prompt input. The prompt has **not been sent**, successful
-login has not been established, and no model response has been validated.
-Launching the terminal alone does not establish that the authenticated CLI
-connection or real task execution works.
+the native Terminal application. The user manually inspected its window and
+confirmed that the official CLI was waiting for OAuth login, then requested a
+fresh attempt. The old isolated login process had ended, and the unused local
+launch entry was removed through the application's UI. No account files were
+inspected or changed by AutoResume or the development tools.
 
-No existing conversation was resumed or interrupted. Real managed inference and
-real quota exhaustion/recovery remain unverified. If this single request later
-succeeds, it can establish one normal managed execution only; it cannot establish
-automatic recovery across a quota window.
+The corrected native application was then used for the fresh attempt. It
+received the script's startup acknowledgement, and the user completed official
+login and sent the authorized prompt once. The user reported the exact reply
+`AUTORESUME_SMOKE_OK`. AutoResume's native UI showed the running and completed
+events. A read-only query of AutoResume's own database independently confirmed
+the completed turn status, disabled automatic consent and **zero automatic
+submission intents** for this isolated task.
+
+The same activity record also contained unmatched-response safety blocks
+before and after completion. The first was 37 seconds after connection. Source
+review identified a reproducible path where a timed-out read is removed from
+the pending map and its late response is then treated as unknown. Without raw
+RPC capture, the precise method responsible for the live event is unknown;
+the timing is consistent with this bug but does not establish causation.
+
+No existing conversation was resumed or interrupted. This establishes one
+normal managed execution, with a connection-handling issue discovered during
+the test. It does **not** establish automatic recovery across a quota window.
+No further real model request was sent to validate the subsequent correction.
+
+### Terminal startup confirmation
+
+The initial launcher treated a successful system open request as proof that the
+terminal script was running. The corrected Mac launcher waits up to 15 seconds
+for an exact, nonsecret acknowledgement written by the script after consuming
+its private local channel capability. An accepted open request without that
+acknowledgement now fails visibly, cancels the unused managed connection and
+cleans the attempt's files. Official login may still take as long as the user
+needs after startup is confirmed.
+
+The task view distinguishes opening, confirmed startup awaiting login/input,
+and an authenticated terminal connection. A failure before thread creation
+retains its specific reason; a late launch confirmation cannot restore revoked
+execution consent. Five new fake-opener tests cover missing/invalid confirmation,
+open failure, timeout, slow login, late invocation and private files. A sixth
+test checks the pre-thread failure boundary. All 86 Rust tests, formatting,
+Clippy and 15 frontend tests passed locally. These are fixture tests, not
+real-account inference or quota-recovery evidence.
+
+### Late responses to timed-out reads
+
+The actor retains at most 256 exact request IDs for timed-out, explicitly
+read-only RPCs. A matching late response is consumed once and discarded in full:
+it cannot update account, quota or history state, forward a second response to
+the caller, or trigger execution. Unknown, duplicate, evicted and write-request
+IDs retain strict failure behavior. A timed-out automatic submission keeps its
+durable ambiguous intent even if a later success response arrives.
+
+The final local suite contains 92 passing Rust tests, including stale client and
+internal reads, deferred thread-start protection, unknown/duplicate IDs, bounded
+retirement and uncertain writes. Formatting and Clippy passed. These tests
+reproduce and address the source defect; no additional real inference was
+performed after this correction, and its connection behavior still needs
+long-duration real-account observation.
+
+The final local ARM64 DMG SHA-256 is
+`1d699d426630d8ed5539aac50e81bf56169ae3c29ac4f9627aa645826cdb881c`.
+Published installers are built independently by the tagged release workflow;
+their checksums will be supplied in that release's `SHA256SUMS.txt`.
 
 ### Earlier live read-only connection and quota checks
 

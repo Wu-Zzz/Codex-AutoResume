@@ -7,64 +7,13 @@ pub async fn open(spec: &LaunchSpec, data_dir: &Path) -> Result<(), String> {
     validate(spec)?;
     #[cfg(target_os = "macos")]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let parent = data_dir.join("terminal-launchers");
-        std::fs::create_dir_all(&parent).map_err(|_| "无法准备终端启动器")?;
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "无法保护终端启动器")?;
-        // A later launch must not share files with an earlier cleanup timer.
-        let directory = parent.join(format!("{}-{}", spec.id, uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).map_err(|_| "终端已在打开，请勿重复操作")?;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "无法保护终端启动器")?;
-        let token_file = directory.join("channel");
-        let script_file = directory.join("Codex.command");
-        let result = async {
-            // This is a freshly generated loopback IPC nonce, not an account token.
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(&token_file)
-                .map_err(|_| "无法创建本地连接凭据")?;
-            file.write_all(spec.token.as_bytes())
-                .map_err(|_| "无法保存本地连接凭据")?;
-            let script = mac_script(spec, &token_file, &script_file)?;
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o700)
-                .open(&script_file)
-                .map_err(|_| "无法创建终端启动器")?;
-            file.write_all(script.as_bytes())
-                .map_err(|_| "无法保存终端启动器")?;
-            let status = tokio::process::Command::new("/usr/bin/open")
-                .args(["-a", "Terminal"])
-                .arg(&script_file)
-                .status()
-                .await
-                .map_err(|_| "无法打开系统终端")?;
-            if !status.success() {
-                return Err("无法打开系统终端".to_owned());
-            }
-            Ok(())
-        }
-        .await;
-        if result.is_err() {
-            let _ = std::fs::remove_file(&token_file);
-            let _ = std::fs::remove_file(&script_file);
-            let _ = std::fs::remove_dir(&directory);
-        } else {
-            // A cancelled Terminal open must not leave a usable capability on disk.
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-                let _ = std::fs::remove_file(token_file);
-                let _ = std::fs::remove_file(script_file);
-                let _ = std::fs::remove_dir(directory);
-            });
-        }
-        result
+        open_macos(
+            spec,
+            data_dir,
+            tokio::process::Command::new("/usr/bin/open"),
+            std::time::Duration::from_secs(15),
+        )
+        .await
     }
     #[cfg(target_os = "windows")]
     {
@@ -80,6 +29,116 @@ pub async fn open(spec: &LaunchSpec, data_dir: &Path) -> Result<(), String> {
         let _ = (spec, data_dir);
         Err("当前仅支持 macOS 和 Windows 终端".into())
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const STARTED_MARKER: &str = "AUTORESUME_TERMINAL_STARTED\n";
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+struct MacLauncher {
+    directory: std::path::PathBuf,
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+impl MacLauncher {
+    fn prepare(spec: &LaunchSpec, data_dir: &Path) -> Result<Self, String> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        validate(spec)?;
+        let parent = data_dir.join("terminal-launchers");
+        std::fs::create_dir_all(&parent).map_err(|_| "无法准备终端启动器")?;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "无法保护终端启动器")?;
+        let directory = parent.join(format!("{}-{}", spec.id, uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).map_err(|_| "无法准备终端启动目录")?;
+        let launcher = Self { directory };
+        std::fs::set_permissions(&launcher.directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "无法保护终端启动器")?;
+        let token_file = launcher.directory.join("channel");
+        let script_file = launcher.directory.join("Codex.command");
+        // This is a freshly generated loopback IPC nonce, not an account token.
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&token_file)
+            .map_err(|_| "无法创建本地连接凭据")?;
+        file.write_all(spec.token.as_bytes())
+            .map_err(|_| "无法保存本地连接凭据")?;
+        let script = mac_script(spec, &token_file, &script_file)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o700)
+            .open(&script_file)
+            .map_err(|_| "无法创建终端启动器")?;
+        file.write_all(script.as_bytes())
+            .map_err(|_| "无法保存终端启动器")?;
+        Ok(launcher)
+    }
+
+    fn acknowledged(&self) -> Result<bool, String> {
+        use std::io::{ErrorKind, Read};
+
+        match std::fs::File::open(self.directory.join("started")) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take((STARTED_MARKER.len() + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| "无法读取终端启动确认")?;
+                if bytes == STARTED_MARKER.as_bytes() {
+                    Ok(true)
+                } else {
+                    Err("终端启动确认无效，未建立托管连接".into())
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(_) => Err("无法读取终端启动确认".into()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+impl Drop for MacLauncher {
+    fn drop(&mut self) {
+        // Per-attempt files cannot interfere with a later launch. Cleanup also
+        // runs when a launch future is cancelled or its opener times out.
+        for name in ["channel", "Codex.command", "started", "started.tmp"] {
+            let _ = std::fs::remove_file(self.directory.join(name));
+        }
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+async fn open_macos(
+    spec: &LaunchSpec,
+    data_dir: &Path,
+    mut opener: tokio::process::Command,
+    launch_timeout: std::time::Duration,
+) -> Result<(), String> {
+    let launcher = MacLauncher::prepare(spec, data_dir)?;
+    opener
+        .args(["-a", "Terminal"])
+        .arg(launcher.directory.join("Codex.command"))
+        .kill_on_drop(true);
+    tokio::time::timeout(launch_timeout, async {
+        let status = opener.status().await.map_err(|_| "无法打开系统终端")?;
+        if !status.success() {
+            return Err("无法打开系统终端".into());
+        }
+        loop {
+            if launcher.acknowledged()? {
+                // Only confirm script startup here. Official login can take as
+                // long as the user needs and is never limited by this deadline.
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| "终端未确认启动，请打开系统终端后重试".to_owned())?
 }
 
 fn validate(spec: &LaunchSpec) -> Result<(), String> {
@@ -206,13 +265,16 @@ fn mac_script(spec: &LaunchSpec, token_file: &Path, script_file: &Path) -> Resul
     Ok(format!(
         r#"#!/bin/sh
 set -eu
+umask 077
 unset channel {env}
 channel=$(cat {token})
+test -n "$channel"
 rm -f -- {token} {script}
-rmdir -- {directory} 2>/dev/null || true
 export CODEX_HOME={home}
 export PATH={parent}:"${{PATH:-/usr/bin:/bin}}"
 cd -- {cwd}
+printf '%s' {started_marker} > {started_tmp}
+mv -- {started_tmp} {started}
 if ! {executable} login status >/dev/null 2>&1; then
   if ! {executable} login; then
     printf '%s\n' '登录未完成，未启动任务' >&2
@@ -233,7 +295,9 @@ exec {executable} {resume}--remote {endpoint} --remote-auth-token-env {env}
         home = path(&spec.codex_home)?,
         cwd = path(&spec.cwd)?,
         endpoint = quote(&spec.endpoint),
-        directory = path(script_file.parent().ok_or("终端启动目录无效")?)?,
+        started_marker = quote(STARTED_MARKER),
+        started = path(&script_file.with_file_name("started"))?,
+        started_tmp = path(&script_file.with_file_name("started.tmp"))?,
     ))
 }
 
@@ -355,6 +419,15 @@ login:)
   case "$(cat "$CODEX_HOME/mode")" in
     fail) exit 2 ;;
     no-state) exit 0 ;;
+    slow)
+      remaining=200
+      while test ! -f "$CODEX_HOME/release-login"; do
+        test "$remaining" -gt 0 || exit 94
+        remaining=$((remaining - 1))
+        sleep 0.025
+      done
+      touch "$CODEX_HOME/ready"
+      ;;
     *) touch "$CODEX_HOME/ready" ;;
   esac
   ;;
@@ -404,6 +477,185 @@ esac
         fn events(&self) -> String {
             std::fs::read_to_string(self.spec.codex_home.join("events")).unwrap()
         }
+
+        fn opener(&self, body: &str) -> tokio::process::Command {
+            use std::os::unix::fs::PermissionsExt;
+
+            let executable = self._directory.path().join("fake-open");
+            std::fs::write(&executable, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut command = tokio::process::Command::new(executable);
+            command.env("TEST_DIRECTORY", self._directory.path());
+            command
+        }
+
+        fn app_data(&self) -> std::path::PathBuf {
+            self._directory.path().join("app-data")
+        }
+
+        fn assert_launch_files_removed(&self) {
+            assert_eq!(
+                std::fs::read_dir(self.app_data().join("terminal-launchers"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+
+        async fn wait_for_event(&self, event: &str) {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if std::fs::read_to_string(self.spec.codex_home.join("events"))
+                        .unwrap_or_default()
+                        .lines()
+                        .any(|line| line == event)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mac_open_requires_exact_script_acknowledgement_and_cleans_failed_attempts() {
+        for opener in [
+            "exit 0",
+            "exit 7",
+            "printf '%s' incorrect > \"$(dirname \"$3\")/started\"\nexit 0",
+        ] {
+            let fixture = Fixture::new("success");
+            let result = open_macos(
+                &fixture.spec,
+                &fixture.app_data(),
+                fixture.opener(opener),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            assert!(result.is_err());
+            fixture.assert_launch_files_removed();
+            assert!(!fixture.spec.codex_home.join("events").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mac_open_times_out_and_kills_an_unresponsive_opener() {
+        let fixture = Fixture::new("success");
+        let opener = fixture
+            .opener("printf '%s' \"$$\" > \"$TEST_DIRECTORY/opener-pid\"\nexec /bin/sleep 30");
+        assert!(open_macos(
+            &fixture.spec,
+            &fixture.app_data(),
+            opener,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .is_err());
+        fixture.assert_launch_files_removed();
+        let pid = std::fs::read_to_string(fixture._directory.path().join("opener-pid")).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status = tokio::process::Command::new("/bin/kill")
+                    .args(["-0", pid.trim()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await
+                    .unwrap();
+                if !status.success() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!fixture.spec.codex_home.join("events").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mac_open_confirms_startup_without_timing_out_slow_official_login() {
+        let fixture = Fixture::new("slow");
+        let opener =
+            fixture.opener("/bin/sh \"$3\" > \"$TEST_DIRECTORY/launcher-output\" 2>&1 &\nexit 0");
+        open_macos(
+            &fixture.spec,
+            &fixture.app_data(),
+            opener,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        fixture.assert_launch_files_removed();
+        fixture.wait_for_event("login").await;
+        assert_eq!(fixture.events(), "status\nlogin\n");
+        // Startup is complete, although the fake user has not finished login.
+        std::fs::write(fixture.spec.codex_home.join("release-login"), "").unwrap();
+        fixture.wait_for_event("remote").await;
+        assert_eq!(fixture.events(), "status\nlogin\nstatus\nremote\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mac_late_invocation_cannot_use_a_timed_out_launch() {
+        let fixture = Fixture::new("success");
+        let opener = fixture.opener("cp \"$3\" \"$TEST_DIRECTORY/late.command\"\nexit 0");
+        assert!(open_macos(
+            &fixture.spec,
+            &fixture.app_data(),
+            opener,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .is_err());
+        fixture.assert_launch_files_removed();
+        let output = tokio::process::Command::new("/bin/sh")
+            .arg(fixture._directory.path().join("late.command"))
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!fixture.spec.codex_home.join("events").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_launch_files_are_private_and_marker_contains_no_capability() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("fail");
+        let launcher = MacLauncher::prepare(&fixture.spec, &fixture.app_data()).unwrap();
+        for (name, mode) in [("", 0o700), ("channel", 0o600), ("Codex.command", 0o700)] {
+            assert_eq!(
+                std::fs::metadata(launcher.directory.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+        }
+        let output = std::process::Command::new("/bin/sh")
+            .arg(launcher.directory.join("Codex.command"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success()); // The fixture intentionally refuses login.
+        assert!(launcher.acknowledged().unwrap());
+        let marker = launcher.directory.join("started");
+        assert_eq!(std::fs::read(&marker).unwrap(), STARTED_MARKER.as_bytes());
+        assert_eq!(
+            std::fs::metadata(marker).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!STARTED_MARKER.contains(&fixture.spec.token));
+        drop(launcher);
+        fixture.assert_launch_files_removed();
     }
 
     #[cfg(unix)]
