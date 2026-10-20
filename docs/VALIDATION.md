@@ -28,8 +28,8 @@ over unrelated sessions. Independent source review and local macOS packaging che
 | Integrated Rust tests | 92 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
 | Rust formatting and Clippy | Passed; Clippy covered all targets with warnings denied |
 | Current macOS ARM64 application and DMG | Rebuilt with the icon, terminal-startup and late-read corrections: app 14.55 MiB, DMG 4.63 MiB; strict ad-hoc signature and disk-image integrity checks passed |
-| Last completed macOS/Windows CI | [Run 39423839950](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39423839950), commit `5dc890cbbe5c276e569a7b7faebfa9a77e1b1990`, both macOS and Windows passed all tests, static checks and release application compilation; predates the terminal-startup and late-read corrections |
-| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled in the earlier Windows CI above; the final revision needs its own packaging pipeline checks. Real-machine terminal/login GUI verification still required |
+| Final macOS/Windows CI | [Run 39430135628](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39430135628), commit `ad70a473a0ea65a44603417915d742fbb6495b2f`, both macOS and Windows passed all tests, static checks and release application compilation |
+| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled in final Windows CI; real-machine terminal/login GUI verification still required |
 | Authorized isolated terminal launch | Fresh native attempt confirmed script startup, followed by the user's official login and one isolated request; automatic continuation remained off |
 | Real managed model inference | One authorized isolated request completed: user reported `AUTORESUME_SMOKE_OK`, native UI showed the running-to-completed transition, and the application database recorded a completed turn with zero automatic submission intents |
 | Real quota exhaustion and automatic recovery | **Not performed** |
@@ -42,7 +42,29 @@ Independent review found and resolved official TUI optional-field compatibility 
 current local pass; any subsequent code correction requires the affected checks
 to be rerun. They are not proof of real quota recovery or package acceptance.
 
-### Mac icon correction and package check
+### Published Alpha and download verification
+
+[v0.1.0-alpha.1](https://github.com/Wu-Zzz/Codex-AutoResume/releases/tag/v0.1.0-alpha.1)
+is a public prerelease of code commit
+`ad70a473a0ea65a44603417915d742fbb6495b2f`.
+[Packaging run 39430135542](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39430135542)
+passed every platform job and the publish job. Both Mac DMGs passed disk-image
+integrity and ad-hoc signature checks. The Windows x64 NSIS package passed its
+silent-install check in a disposable runner. The publish job verified all three
+installer assets and their checksum file before making the release public.
+
+All four public assets were independently downloaded after publication. The
+three installers passed `shasum -a 256 -c SHA256SUMS.txt`. The release is not a
+draft and is marked as a prerelease. Intel Mac is cross-compiled; Intel Mac and
+Windows interactive GUI behavior remain unverified. Neither these packaging
+checks nor the isolated normal turn establish real quota recovery.
+
+The final local application was reopened successfully and displayed read-only
+account quota. The completed isolated test entry was removed from AutoResume
+after its sanitized verification record was saved; no original Codex history
+was deleted, and no second model request was issued.
+
+### Earlier Mac icon correction and package check
 
 The Mac icon generator previously removed the canonical SVG root and lost its
 inherited `fill="none"`, leaving the open C-loop filled black. It now nests the
@@ -335,6 +357,6 @@ This is an unsigned/unnotarized developer-identity preview, not a verified autom
 - Validate the managed warm-session ownership and configuration boundary end to
   end, including safe refusal after disconnect/restart. External-chat execution
   and automatic cold resume remain unsupported.
-- Test real inference, quota exhaustion and recovery on a disposable, explicitly
+- Test real quota exhaustion and recovery on a disposable, explicitly
   authorized task, including lost response and simultaneous manual-input cases.
 - Obtain developer code-signing credentials, notarize the Mac build, and complete fresh-machine installation and lifecycle validation.
