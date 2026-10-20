@@ -24,16 +24,19 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos-arm64
             bundle: dmg
+            bundles: app,dmg
             extension: dmg
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos-x64
             bundle: dmg
+            bundles: app,dmg
             extension: dmg
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x64
             bundle: nsis
+            bundles: nsis
             extension: exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -45,6 +48,7 @@ jobs:
       BUILD_TARGET: ${{ matrix.target }}
       BUILD_PLATFORM: ${{ matrix.platform }}
       BUNDLE_FORMAT: ${{ matrix.bundle }}
+      BUILD_BUNDLES: ${{ matrix.bundles }}
       INSTALLER_EXTENSION: ${{ matrix.extension }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -80,7 +84,7 @@ jobs:
       - name: Build installer
         env:
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
-        run: npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUNDLE_FORMAT" -- --locked
+        run: npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" -- --locked
       - name: Verify Mac image and ad-hoc signature
         if: runner.os == 'macOS'
         run: |

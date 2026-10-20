@@ -1,5 +1,6 @@
 use crate::{
     protocol::{self, Rpc},
+    quota::{self, QuotaTelemetry},
     scheduler::{
         self, Ownership, QuotaSnapshot, SafetyGate, TaskRecord, TaskState, TaskView,
         TurnObservation, TurnStatus,
@@ -15,8 +16,8 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str = "当前仅支持监测。真实额度调度、会话恢复和执行提交尚未实现。";
-const TAKEOVER_BLOCKED: &str = "已开启监测，尚不能确认原客户端的实时执行状态；自动续跑尚未实现";
+pub const COMPATIBILITY: &str = "已有 Desktop / CLI 会话仅监测。新任务可从本工具打开官方终端，并单独授权自动续跑；当前处于开发验证阶段。重启或终端断开后不会自动接管。";
+const TAKEOVER_BLOCKED: &str = "仅监测已有会话；无法确认原客户端的独占执行权，不会自动续跑";
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -35,6 +36,7 @@ pub struct Snapshot {
     pub compatibility_message: Option<String>,
     pub paused_all: bool,
     pub checked_at: Option<i64>,
+    pub quota: Option<QuotaTelemetry>,
     pub tasks: Vec<TaskView>,
 }
 
@@ -48,6 +50,7 @@ impl Default for Snapshot {
             compatibility_message: Some(COMPATIBILITY.into()),
             paused_all: false,
             checked_at: None,
+            quota: None,
             tasks: vec![],
         }
     }
@@ -68,6 +71,7 @@ pub struct Candidate {
 pub struct AppState {
     pub runtime: Mutex<Runtime>,
     pub snapshot: RwLock<Snapshot>,
+    pub managed: crate::managed::ManagedHub,
 }
 
 pub struct Runtime {
@@ -92,6 +96,10 @@ impl AppState {
             ..Snapshot::default()
         };
         Ok(Arc::new(Self {
+            managed: crate::managed::ManagedHub::open(
+                path.parent().ok_or("应用数据目录无效")?,
+                path,
+            )?,
             runtime: Mutex::new(Runtime {
                 rpc: None,
                 store,
@@ -113,27 +121,40 @@ impl AppState {
     pub async fn refresh(&self) {
         let mut runtime = self.runtime.lock().await;
         if let Err(error) = runtime.refresh().await {
-            runtime.snapshot.connection = if error.starts_with("missing:") {
-                "missing"
-            } else {
-                "error"
-            }
-            .into();
-            runtime.snapshot.connection_message = error.trim_start_matches("missing:").into();
-            runtime.snapshot.account_label = None;
-            runtime.rpc = None;
-            for task in &mut runtime.tasks {
-                scheduler::block(task, "连接中断，恢复后将重新核对，不会重放操作", now());
-            }
-            for task in &runtime.tasks {
-                if runtime.store.save_task(task).is_err() {
-                    runtime.snapshot.connection_message =
-                        "连接中断，且本地状态保存失败，请检查磁盘空间".into();
-                    break;
-                }
-            }
+            runtime.connection_failed(&error);
         }
         self.publish(&mut runtime).await;
+    }
+
+    pub async fn combined_snapshot(&self) -> Result<Snapshot, String> {
+        let mut snapshot = self.snapshot.read().await.clone();
+        let managed = self.managed.views().await?;
+        if managed.iter().any(|task| task.connected) {
+            snapshot.quota = managed
+                .iter()
+                .filter(|task| task.connected)
+                .filter_map(|task| task.quota.clone())
+                .max_by_key(|quota| quota.observed_at);
+        }
+        snapshot
+            .tasks
+            .extend(managed.into_iter().map(|task| TaskView {
+                mode: "managed",
+                can_enable: task.can_enable,
+                id: task.id,
+                title: task.title,
+                cwd: task.cwd,
+                enabled: task.auto_resume,
+                state: task.state,
+                detail: task.detail,
+                resets_at: task.resets_at,
+                events: task.events,
+            }));
+        Ok(snapshot)
+    }
+
+    pub async fn is_managed(&self, id: &str) -> Result<bool, String> {
+        Ok(self.managed.views().await?.iter().any(|task| task.id == id))
     }
 }
 
@@ -163,6 +184,29 @@ fn candidate(thread: &Value) -> Result<Candidate, String> {
 }
 
 impl Runtime {
+    fn connection_failed(&mut self, error: &str) {
+        self.snapshot.connection = if error.starts_with("missing:") {
+            "missing"
+        } else {
+            "error"
+        }
+        .into();
+        self.snapshot.connection_message = error.trim_start_matches("missing:").into();
+        self.snapshot.account_label = None;
+        self.snapshot.quota = None;
+        self.rpc = None;
+        for task in &mut self.tasks {
+            scheduler::block(task, "连接中断，恢复后将重新核对，不会重放操作", now());
+        }
+        for task in &self.tasks {
+            if self.store.save_task(task).is_err() {
+                self.snapshot.connection_message =
+                    "连接中断，且本地状态保存失败，请检查磁盘空间".into();
+                break;
+            }
+        }
+    }
+
     async fn rpc(&mut self) -> Result<&mut Rpc, String> {
         if self.rpc.is_none() {
             let rpc = Rpc::connect().await?;
@@ -172,10 +216,23 @@ impl Runtime {
         self.rpc.as_mut().ok_or("Codex 未连接".into())
     }
 
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let response = match self.rpc().await {
+            Ok(rpc) => rpc.request(method, params).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = &response {
+            if self.rpc.as_ref().is_none_or(|rpc| !rpc.is_usable()) {
+                // Clear a failed transport immediately, including UI-initiated
+                // reads. Never retry the request on a replacement connection.
+                self.connection_failed(error);
+            }
+        }
+        response
+    }
+
     async fn refresh(&mut self) -> Result<(), String> {
         let account = self
-            .rpc()
-            .await?
             .request("account/read", json!({"refreshToken":false}))
             .await?;
         self.snapshot.checked_at = Some(now());
@@ -189,6 +246,7 @@ impl Runtime {
             }
             .into();
             self.snapshot.account_label = None;
+            self.snapshot.quota = None;
             for task in &mut self.tasks {
                 scheduler::block(task, "需要检查 ChatGPT 登录状态", now());
                 self.store.save_task(task).map_err(|e| e.to_string())?;
@@ -205,19 +263,25 @@ impl Runtime {
         ));
         self.snapshot.connection = "ready".into();
         self.snapshot.connection_message = "已连接本机 Codex · 只读监测".into();
+        // Account telemetry remains current while task monitoring is paused.
+        // This tolerant display view never supplies the execution safety gate.
+        self.snapshot.quota = None;
+        match self.request("account/rateLimits/read", json!({})).await {
+            Ok(response) => {
+                self.snapshot.quota = quota::parse_telemetry(&response, now());
+                if self.snapshot.quota.is_none() {
+                    self.snapshot.connection_message = "会话已连接，额度数据暂不可用".into();
+                }
+            }
+            Err(error) => {
+                if self.rpc.is_none() {
+                    return Err(error);
+                }
+                self.snapshot.connection_message = "会话已连接，额度暂时无法读取".into();
+            }
+        }
         if self.paused {
             return Ok(());
-        }
-
-        // Do not infer model-to-bucket associations from one account bucket. The
-        // future executing adapter must supply verified required_limit_ids.
-        let quota = self
-            .rpc()
-            .await?
-            .request("account/rateLimits/read", json!({}))
-            .await;
-        if quota.is_err() {
-            self.snapshot.connection_message = "会话已连接，额度暂时无法读取".into();
         }
         for index in 0..self.tasks.len() {
             if !self.tasks[index].enabled {
@@ -225,10 +289,11 @@ impl Runtime {
             }
             let id = self.tasks[index].id.clone();
             let response = self
-                .rpc()
-                .await?
                 .request("thread/read", json!({"threadId":id,"includeTurns":true}))
                 .await;
+            if self.rpc.is_none() {
+                return Err(response.err().unwrap_or_else(|| "Codex 连接已关闭".into()));
+            }
             let task = &mut self.tasks[index];
             match response {
                 Ok(response) => {
@@ -297,7 +362,7 @@ impl Runtime {
         let mut cursor: Option<String> = None;
         let mut seen = std::collections::HashSet::new();
         loop {
-            let response = self.rpc().await?.request("thread/list", json!({"cursor":cursor,"limit":100,"sortKey":"updated_at","sourceKinds":["cli","vscode","appServer","exec"],"useStateDbOnly":true})).await?;
+            let response = self.request("thread/list", json!({"cursor":cursor,"limit":100,"sortKey":"updated_at","sourceKinds":["cli","vscode","appServer","exec"],"useStateDbOnly":true})).await?;
             let rows = response
                 .get("data")
                 .and_then(Value::as_array)
@@ -338,8 +403,6 @@ impl Runtime {
             return Ok(());
         }
         let response = self
-            .rpc()
-            .await?
             .request("thread/read", json!({"threadId":id,"includeTurns":false}))
             .await?;
         let item = candidate(&response["thread"])?;
@@ -393,8 +456,6 @@ impl Runtime {
 
     pub async fn login_url(&mut self) -> Result<String, String> {
         let result = self
-            .rpc()
-            .await?
             .request("account/login/start", json!({"type":"chatgpt"}))
             .await?;
         let raw = result
@@ -410,5 +471,245 @@ impl Runtime {
             return Err("登录链接不是受支持的官方地址".into());
         }
         Ok(url.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{
+        io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf},
+        time::{timeout, Duration},
+    };
+
+    type Reader = BufReader<ReadHalf<DuplexStream>>;
+    type Writer = WriteHalf<DuplexStream>;
+
+    fn transport() -> (Rpc, Reader, Writer) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = split(client);
+        let (server_read, server_write) = split(server);
+        (
+            Rpc::from_io(None, client_write, client_read, "fixture".into()),
+            BufReader::new(server_read),
+            server_write,
+        )
+    }
+
+    async fn request(reader: &mut Reader, expected_method: &str) -> Value {
+        let mut line = String::new();
+        let bytes = timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("fixture request timed out")
+            .unwrap();
+        assert_ne!(bytes, 0);
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["method"], expected_method);
+        value
+    }
+
+    async fn respond(writer: &mut Writer, request: &Value, result: Value) {
+        let response = json!({"id":request["id"],"result":result});
+        writer
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn reject(writer: &mut Writer, request: &Value) {
+        let response =
+            json!({"id":request["id"],"error":{"code":-32600,"message":"fixture rejection"}});
+        writer
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn account(reader: &mut Reader, writer: &mut Writer) {
+        let request = request(reader, "account/read").await;
+        respond(
+            writer,
+            &request,
+            json!({"account":{"type":"chatgpt","planType":"plus"}}),
+        )
+        .await;
+    }
+
+    async fn finish_task(reader: &mut Reader, writer: &mut Writer, id: &str) {
+        let request = request(reader, "thread/read").await;
+        assert_eq!(request["params"]["threadId"], id);
+        respond(
+            writer,
+            &request,
+            json!({"thread":{"id":id,"turns":[{"id":"completed-turn","status":"completed","error":null}]}}),
+        )
+        .await;
+    }
+
+    async fn state(rpc: Rpc) -> Arc<AppState> {
+        let state = AppState::open(Path::new(":memory:")).unwrap();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.rpc = Some(rpc);
+            for id in ["first", "second"] {
+                let mut task = TaskRecord::new(id.into(), id.into(), "/fixture".into());
+                scheduler::set_enabled(&mut task, true, 1);
+                runtime.store.save_task(&task).unwrap();
+                runtime.tasks.push(task);
+            }
+        }
+        state
+    }
+
+    fn telemetry_response() -> Value {
+        json!({"rateLimitsByLimitId":{"codex":{
+            "limitId":"codex",
+            "primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":250}
+        }}})
+    }
+
+    #[tokio::test]
+    async fn quota_rpc_rejection_does_not_disconnect_or_prevent_task_reads() {
+        let (rpc, mut reader, mut writer) = transport();
+        let state = state(rpc).await;
+        state.runtime.lock().await.snapshot.quota =
+            quota::parse_telemetry(&telemetry_response(), 1);
+        let server = tokio::spawn(async move {
+            account(&mut reader, &mut writer).await;
+            let quota = request(&mut reader, "account/rateLimits/read").await;
+            reject(&mut writer, &quota).await;
+            finish_task(&mut reader, &mut writer, "first").await;
+            finish_task(&mut reader, &mut writer, "second").await;
+        });
+        state.refresh().await;
+        let snapshot = state.snapshot.read().await;
+        assert_eq!(snapshot.connection, "ready");
+        assert!(snapshot.connection_message.contains("额度暂时无法读取"));
+        assert!(snapshot.quota.is_none());
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::Completed));
+        assert!(state.runtime.lock().await.rpc.as_ref().unwrap().is_usable());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_thread_does_not_disconnect_other_tasks() {
+        let (rpc, mut reader, mut writer) = transport();
+        let state = state(rpc).await;
+        let server = tokio::spawn(async move {
+            account(&mut reader, &mut writer).await;
+            let quota = request(&mut reader, "account/rateLimits/read").await;
+            respond(&mut writer, &quota, json!({})).await;
+            let missing = request(&mut reader, "thread/read").await;
+            assert_eq!(missing["params"]["threadId"], "first");
+            reject(&mut writer, &missing).await;
+            finish_task(&mut reader, &mut writer, "second").await;
+        });
+        state.refresh().await;
+        let snapshot = state.snapshot.read().await;
+        assert_eq!(snapshot.connection, "ready");
+        assert_eq!(snapshot.tasks[0].state, TaskState::NeedsAttention);
+        assert_eq!(snapshot.tasks[1].state, TaskState::Completed);
+        assert!(state.runtime.lock().await.rpc.as_ref().unwrap().is_usable());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn broken_quota_transport_is_cleared_before_the_next_refresh() {
+        let (rpc, mut reader, mut writer) = transport();
+        let state = state(rpc).await;
+        state.runtime.lock().await.snapshot.quota =
+            quota::parse_telemetry(&telemetry_response(), 1);
+        let server = tokio::spawn(async move {
+            account(&mut reader, &mut writer).await;
+            request(&mut reader, "account/rateLimits/read").await;
+            writer.shutdown().await.unwrap();
+            drop(writer);
+            let mut next = String::new();
+            assert_eq!(reader.read_line(&mut next).await.unwrap(), 0);
+        });
+        state.refresh().await;
+        assert!(state.runtime.lock().await.rpc.is_none());
+        assert_eq!(state.snapshot.read().await.connection, "error");
+        assert!(state.snapshot.read().await.quota.is_none());
+        server.await.unwrap();
+
+        // A fresh transport reconciles from account/history reads. The failed
+        // quota request is not replayed by the transport itself.
+        let (rpc, mut reader, mut writer) = transport();
+        state.runtime.lock().await.rpc = Some(rpc);
+        let server = tokio::spawn(async move {
+            account(&mut reader, &mut writer).await;
+            let quota = request(&mut reader, "account/rateLimits/read").await;
+            respond(&mut writer, &quota, json!({})).await;
+            finish_task(&mut reader, &mut writer, "first").await;
+            finish_task(&mut reader, &mut writer, "second").await;
+        });
+        state.refresh().await;
+        let snapshot = state.snapshot.read().await;
+        assert_eq!(snapshot.connection, "ready");
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::Completed));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interactive_list_transport_failure_immediately_clears_connection() {
+        let (rpc, mut reader, writer) = transport();
+        let state = state(rpc).await;
+        let server = tokio::spawn(async move {
+            request(&mut reader, "thread/list").await;
+            drop(writer);
+        });
+        let mut runtime = state.runtime.lock().await;
+        assert!(runtime.list_candidates().await.is_err());
+        assert!(runtime.rpc.is_none());
+        assert_eq!(runtime.snapshot.connection, "error");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paused_monitoring_still_refreshes_quota_without_reading_tasks() {
+        let (rpc, mut reader, mut writer) = transport();
+        let state = state(rpc).await;
+        state.runtime.lock().await.paused = true;
+        let server = tokio::spawn(async move {
+            account(&mut reader, &mut writer).await;
+            let quota = request(&mut reader, "account/rateLimits/read").await;
+            respond(&mut writer, &quota, telemetry_response()).await;
+        });
+        state.refresh().await;
+        let snapshot = state.snapshot.read().await;
+        assert_eq!(snapshot.connection, "ready");
+        assert!(snapshot.paused_all);
+        let quota = snapshot.quota.as_ref().expect("fresh quota while paused");
+        assert_eq!(quota.buckets[0].windows[0].used_percent, Some(37));
+        assert!(quota.observed_at > 1);
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::Reconciling));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn login_loss_clears_previously_visible_quota() {
+        let (rpc, mut reader, mut writer) = transport();
+        let state = state(rpc).await;
+        state.runtime.lock().await.snapshot.quota =
+            quota::parse_telemetry(&telemetry_response(), 1);
+        let server = tokio::spawn(async move {
+            let account = request(&mut reader, "account/read").await;
+            respond(&mut writer, &account, json!({"account":null})).await;
+        });
+        state.refresh().await;
+        let snapshot = state.snapshot.read().await;
+        assert_eq!(snapshot.connection, "login_required");
+        assert!(snapshot.quota.is_none());
+        server.await.unwrap();
     }
 }

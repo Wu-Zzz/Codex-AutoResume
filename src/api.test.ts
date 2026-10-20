@@ -50,6 +50,15 @@ describe('desktop boundary', () => {
     expect(await api.call('get_snapshot')).toMatchObject({ pausedAll: true })
     expect(invoke).not.toHaveBeenCalled()
   })
+
+  it('never presents a preview launch as a real managed task', async () => {
+    vi.stubGlobal('window', { location: { search: '?demo=1' } })
+    const api = await import('./api')
+    const before = await api.call('get_snapshot')
+    await expect(api.call('launch_managed', { cwd: '/example/project', autoResume: true })).rejects.toThrow('不会启动真实 Codex')
+    expect(await api.call('get_snapshot')).toEqual(before)
+    expect(invoke).not.toHaveBeenCalled()
+  })
 })
 
 describe('portable view formatting', () => {

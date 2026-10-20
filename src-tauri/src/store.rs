@@ -52,6 +52,18 @@ pub struct Store {
     connection: Connection,
 }
 
+/// Separate, explicit execution consent. Legacy monitoring selections never
+/// create this record. The generation is an audit marker, not a reusable lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedMetadata {
+    pub launch_id: String,
+    pub thread_id: String,
+    pub generation: String,
+    pub auto_resume: bool,
+    pub configuration_fingerprint: String,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let connection = Connection::open(path)?;
@@ -76,6 +88,11 @@ impl Store {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(thread_id, failed_turn_id)
+            );
+            CREATE TABLE IF NOT EXISTS managed_metadata (
+                launch_id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT NOT NULL UNIQUE,
+                record TEXT NOT NULL
             );",
         )?;
         Ok(Self { connection })
@@ -103,15 +120,73 @@ impl Store {
     }
 
     pub fn load_tasks(&self) -> Result<Vec<TaskRecord>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT record FROM tasks ORDER BY id")?;
+        let mut statement = self.connection.prepare(
+            "SELECT record FROM tasks WHERE NOT EXISTS
+                (SELECT 1 FROM managed_metadata WHERE thread_id = tasks.id) ORDER BY id",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut tasks = Vec::new();
         for row in rows {
             tasks.push(serde_json::from_str(&row?)?);
         }
         Ok(tasks)
+    }
+
+    pub fn save_managed_task(
+        &mut self,
+        task: &TaskRecord,
+        metadata: &ManagedMetadata,
+    ) -> Result<()> {
+        if task.id != metadata.thread_id {
+            return Err(StoreError::ConflictingResult);
+        }
+        let transaction = self.connection.transaction()?;
+        write_task(&transaction, task)?;
+        transaction.execute(
+            "INSERT INTO managed_metadata (launch_id, thread_id, record) VALUES (?1, ?2, ?3)
+                ON CONFLICT(launch_id) DO UPDATE SET thread_id = excluded.thread_id,
+                record = excluded.record",
+            params![
+                metadata.launch_id,
+                metadata.thread_id,
+                serde_json::to_string(metadata)?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_managed_tasks(&self) -> Result<Vec<(TaskRecord, ManagedMetadata)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT tasks.record, managed_metadata.record FROM managed_metadata
+                JOIN tasks ON tasks.id = managed_metadata.thread_id ORDER BY launch_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (task, metadata) = row?;
+            Ok((
+                serde_json::from_str(&task)?,
+                serde_json::from_str(&metadata)?,
+            ))
+        })
+        .collect()
+    }
+
+    pub fn remove_managed_task(&mut self, launch_id: &str) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM tasks WHERE id = (SELECT thread_id FROM managed_metadata WHERE launch_id = ?1)",
+            [launch_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM managed_metadata WHERE launch_id = ?1",
+            [launch_id],
+        )?;
+        // Submission tombstones deliberately survive removal.
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn remove_task(&self, id: &str) -> Result<()> {

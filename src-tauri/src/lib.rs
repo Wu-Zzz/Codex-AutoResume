@@ -1,7 +1,10 @@
+mod managed;
 mod protocol;
+mod quota;
 mod runtime;
 pub mod scheduler;
 pub mod store;
+mod terminal;
 
 use runtime::{AppState, Candidate, Snapshot};
 use std::sync::Arc;
@@ -9,26 +12,30 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Emitter, Manager, PhysicalPosition, PhysicalRect, PhysicalSize, State,
 };
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 type Shared = Arc<AppState>;
 
 #[tauri::command]
 async fn get_snapshot(state: State<'_, Shared>) -> Result<Snapshot, String> {
-    Ok(state.snapshot.read().await.clone())
+    state.combined_snapshot().await
 }
 
 #[tauri::command]
 async fn list_candidates(state: State<'_, Shared>) -> Result<Vec<Candidate>, String> {
-    state.runtime.lock().await.list_candidates().await
+    let mut runtime = state.runtime.lock().await;
+    let result = runtime.list_candidates().await;
+    state.publish(&mut runtime).await;
+    result
 }
 
 #[tauri::command]
 async fn add_task(state: State<'_, Shared>, thread_id: String) -> Result<(), String> {
     let mut runtime = state.runtime.lock().await;
-    runtime.add_task(thread_id).await?;
+    let result = runtime.add_task(thread_id).await;
     state.publish(&mut runtime).await;
-    Ok(())
+    result
 }
 
 #[tauri::command]
@@ -37,6 +44,9 @@ async fn set_task_enabled(
     thread_id: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if state.is_managed(&thread_id).await? {
+        return state.managed.set_auto_resume(&thread_id, enabled).await;
+    }
     let mut runtime = state.runtime.lock().await;
     runtime.set_enabled(&thread_id, enabled)?;
     state.publish(&mut runtime).await;
@@ -45,6 +55,7 @@ async fn set_task_enabled(
 
 #[tauri::command]
 async fn set_paused(state: State<'_, Shared>, paused: bool) -> Result<(), String> {
+    state.managed.pause_all(paused).await?;
     let mut runtime = state.runtime.lock().await;
     runtime.set_paused(paused)?;
     state.publish(&mut runtime).await;
@@ -53,6 +64,9 @@ async fn set_paused(state: State<'_, Shared>, paused: bool) -> Result<(), String
 
 #[tauri::command]
 async fn remove_task(state: State<'_, Shared>, thread_id: String) -> Result<(), String> {
+    if state.is_managed(&thread_id).await? {
+        return state.managed.remove(&thread_id).await;
+    }
     let mut runtime = state.runtime.lock().await;
     runtime.remove_task(&thread_id)?;
     state.publish(&mut runtime).await;
@@ -68,7 +82,11 @@ async fn reconnect(state: State<'_, Shared>) -> Result<(), String> {
 
 #[tauri::command]
 async fn login(app: tauri::AppHandle, state: State<'_, Shared>) -> Result<(), String> {
-    let url = state.runtime.lock().await.login_url().await?;
+    let mut runtime = state.runtime.lock().await;
+    let result = runtime.login_url().await;
+    state.publish(&mut runtime).await;
+    drop(runtime);
+    let url = result?;
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "无法打开系统浏览器".into())
@@ -82,11 +100,71 @@ fn open_download(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_main_window(app: tauri::AppHandle, thread_id: Option<String>) -> Result<(), String> {
+async fn choose_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("选择项目文件夹")
+        .pick_folder(move |path| {
+            let _ = sender.send(path);
+        });
+    receiver
+        .await
+        .map_err(|_| "文件夹选择已中断".to_owned())?
+        .map(|file| {
+            file.into_path()
+                .map_err(|_| "请选择本地文件夹".to_owned())?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "文件夹路径编码不受支持".into())
+        })
+        .transpose()
+}
+
+#[tauri::command]
+async fn launch_managed(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    cwd: String,
+    auto_resume: bool,
+) -> Result<String, String> {
+    let spec = state.managed.start(cwd, auto_resume).await?;
+    let directory = app.path().app_data_dir().map_err(|_| "无法读取应用目录")?;
+    if let Err(error) = terminal::open(&spec, &directory).await {
+        let _ = state.managed.remove(&spec.id).await;
+        return Err(error);
+    }
+    Ok(spec.id)
+}
+
+#[tauri::command]
+fn set_window_theme(app: tauri::AppHandle, theme: String) -> Result<(), String> {
+    let theme = match theme.as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        "system" => None,
+        _ => return Err("未知外观设置".into()),
+    };
+    for window in app.webview_windows().values() {
+        window.set_theme(theme).map_err(|_| "无法更新窗口外观")?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn show_main_window(
+    app: tauri::AppHandle,
+    thread_id: Option<String>,
+    add_task: Option<bool>,
+) -> Result<(), String> {
     show_window(&app).map_err(|_| "无法打开主窗口".to_string())?;
     if let Some(thread_id) = thread_id {
         app.emit_to("main", "select-task", thread_id)
             .map_err(|_| "无法定位所选任务".to_string())?;
+    }
+    if add_task == Some(true) {
+        app.emit_to("main", "add-task", ())
+            .map_err(|_| "无法打开添加任务".to_owned())?;
     }
     Ok(())
 }
@@ -97,6 +175,7 @@ pub fn run() {
             let _ = show_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             list_candidates,
@@ -107,6 +186,9 @@ pub fn run() {
             reconnect,
             login,
             open_download,
+            choose_project,
+            launch_managed,
+            set_window_theme,
             show_main_window
         ])
         .setup(|app| {
@@ -123,11 +205,11 @@ pub fn run() {
                 None::<&str>,
             )?;
             let pause =
-                tauri::menu::MenuItem::with_id(app, "pause", "暂停全部监测", true, None::<&str>)?;
+                tauri::menu::MenuItem::with_id(app, "pause", "暂停全部", true, None::<&str>)?;
             let quit = tauri::menu::MenuItem::with_id(
                 app,
                 "quit",
-                "退出（将停止后台监测）",
+                "退出（将停止自动续跑）",
                 true,
                 None::<&str>,
             )?;
@@ -158,6 +240,9 @@ pub fn run() {
                     "pause" => {
                         let state = app.state::<Shared>().inner().clone();
                         tauri::async_runtime::spawn(async move {
+                            if state.managed.pause_all(true).await.is_err() {
+                                return;
+                            }
                             let mut runtime = state.runtime.lock().await;
                             if runtime.set_paused(true).is_ok() {
                                 state.publish(&mut runtime).await;

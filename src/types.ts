@@ -12,6 +12,26 @@ export interface TaskView {
   detail: string
   resetsAt: number | null
   events: TaskEvent[]
+  mode: 'monitor' | 'managed'
+  canEnable?: boolean
+}
+
+export interface QuotaWindow {
+  kind: 'primary' | 'secondary'
+  durationMins: number | null
+  usedPercent: number | null
+  resetsAt: number | null
+}
+
+export interface QuotaTelemetry {
+  observedAt: number
+  source: 'local' | 'managed'
+  buckets: {
+    id: string
+    label: string | null
+    windows: QuotaWindow[]
+    blocked: boolean
+  }[]
 }
 
 export interface Snapshot {
@@ -23,6 +43,7 @@ export interface Snapshot {
   pausedAll: boolean
   checkedAt?: number | null
   tasks: TaskView[]
+  quota?: QuotaTelemetry | null
 }
 
 export interface Candidate {

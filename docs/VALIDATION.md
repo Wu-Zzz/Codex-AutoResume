@@ -1,16 +1,117 @@
 # Validation record
 
-Initial development baseline: 2026-10-20, Asia/Taipei.
+Updated 2026-10-20, Asia/Taipei. The managed execution revision is **in progress**.
+Historical results below remain attached to their original code and do not
+establish that the current working tree is release-ready.
 
-## What this alpha can claim
+## Current implementation and verification status
 
-The live integration is an observation client. It can inspect available local histories through the official Codex App Server. It calls the quota endpoint but only checks whether the call failed: returned buckets/reset timestamps are not parsed into the production scheduler. The successful probe below establishes endpoint connectivity and response shape, not a completed live quota feature.
+The working tree now contains a separate managed path for new tasks opened
+through the application's official Codex terminal. It uses an application-owned
+`CODEX_HOME`, explicit execution consent, an authenticated loopback gateway and a
+single writer to each warm backend. Official login happens before the backend is
+started. Existing Desktop/CLI histories remain **monitoring only**; their
+monitoring switches are not execution consent.
 
-The runtime passes empty quota buckets, unknown ownership, and unpreserved configuration into its safety gate. Production code does not claim or submit continuation intents; resume/start methods are excluded from the transport allowlist, and execution notifications are not consumed. Those implementation gaps exist in addition to the external-chat ownership/configuration limitations in [the protocol audit](protocol-audit.md). An application-owned execution path is a possible architecture, not an implemented capability.
+The managed actor implements quota-trigger handling, strict quota gates,
+history/idle rechecks, an atomic persisted intent before dispatch, response
+reconciliation and refusal to replay uncertain submissions. It retains the warm
+execution context and does not automatically cold-resume after restart or take
+over unrelated sessions. Final review and packaged native checks are still in
+progress; these implementation statements are not a live acceptance result.
 
-Tests of the scheduler prove deterministic decisions against fixtures; they do not prove that a real Desktop chat has safely resumed. A successful build proves compilation, not installation, signing, or a real quota-recovery cycle.
+| Current-revision check | Status and scope |
+| --- | --- |
+| Frontend tests | 15 passed for the current UI revision |
+| Theme and quota presentation | Browser checks passed for the current theme/real-versus-demo presentation and quota views |
+| Connection regression tests | Fixture checks passed for RPC rejection versus transport failure, immediate bad-connection cleanup and isolation of individual history failures |
+| Strict quota parser and separate display telemetry | Targeted parser/scheduler checks passed; display unknowns remain unknown and cannot authorize execution |
+| Integrated Rust tests | 80 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
+| Rust formatting and Clippy | Passed; Clippy covered all targets with warnings denied |
+| New native application build and packaged-app checks | Pending; no current native-build success is claimed yet |
+| Current macOS/Windows CI and installer verification | Pending final revision; historical CI below must not be reused as current evidence |
+| Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Implemented; current CI and real-machine GUI verification still required |
+| Real managed model inference | **Not performed** |
+| Real quota exhaustion and automatic recovery | **Not performed** |
+| Signing/notarization and fresh-machine acceptance | Not established for this revision |
 
-## Live read-only probe
+New fixture coverage includes user input arriving during a recovery check,
+approval/input interruption, changed or unknown configuration, multiple quota
+buckets, existing monitoring consent, failed login, and lost acknowledgements.
+Final adversarial review may still expose issues. The counts above are the
+current local pass; any subsequent code correction requires the affected checks
+to be rerun. They are not proof of real quota recovery or package acceptance.
+
+### Current live read-only connection and quota checks
+
+The installed official CLI was `codex-cli 0.145.0`. A Finder-style minimal PATH
+successfully launched its npm entry and resolved the sibling Node executable.
+Five consecutive cycles of account status, quota read and one-page history
+discovery succeeded on one connection. Account reads took 3–8 ms, list reads 1–13 ms
+and quota reads 959–5029 ms in that sample. This did not reproduce a network
+timeout and does not establish long-duration reliability.
+
+A deliberately nonexistent synthetic thread ID returned JSON-RPC error
+`-32600`. The next account read on that **same official server connection**
+succeeded in 4 ms. This confirms that a normal RPC rejection does not itself
+damage the transport. The previous adapter incorrectly retired its child on such
+errors; the corrected adapter keeps healthy transports and immediately clears
+actual EOF/timeout/malformed-frame failures without replaying requests.
+
+One further quota response was passed in memory to the new strict Rust parser.
+It parsed successfully, contained an identified bucket and reported a known
+spend-control state. The output recorded only parser success and structural
+availability. No account identity, actual quota percentages, reset timestamps,
+private task names or credentials are included here.
+
+All these real-account checks were read-only. They did not invoke login, resume,
+turn start, interruption, approval or inference. Native-launch/login tests use
+synthetic local CLI fixtures, not the user's official account. As required by
+[AGENTS.md](../AGENTS.md), a real execution/recovery test needs explicit
+authorization for a concrete disposable task; general development or release
+authorization does not substitute for that test scope.
+
+### Display and authentication boundaries
+
+- Strict quota parsing covers complete server snapshots and all returned buckets.
+  The independent display parser may expose valid known fields from a shape that
+  the execution parser refuses. Neither a rendered percentage nor a reset
+  countdown is execution permission.
+- Failed quota reads, disconnects and missing login clear stale display data.
+  Global task pause leaves quota refresh active. Managed account telemetry is
+  selected when the managed path is connected, rather than assuming that it
+  belongs to the ordinary local Codex account.
+- Official Codex performs account login and credential storage. The application
+  does not read/copy account credential files. The gateway uses its own generated
+  local channel capability; macOS passes it through a mode-0600 one-use file and
+  then the remote terminal environment, while Windows uses the environment
+  directly. It is absent from command arguments and script content.
+- Terminal fixtures cover literal arguments containing shell metacharacters,
+  removal of nonce files, and refusal to continue after failed or incomplete
+  login. Their eventual integrated result must not be described as a Windows
+  real-machine or real-account acceptance test.
+
+## Historical observation-only baseline
+
+The remaining historical records describe earlier revisions. Their screenshots,
+test counts, bundle sizes and CI commits must not be attributed to the current
+managed implementation.
+
+The initial live integration was an observation client. It inspected available
+local histories through the official Codex App Server. Its quota endpoint call
+only checked whether the call failed; returned buckets/reset timestamps were not
+yet parsed into production scheduling.
+
+That runtime passed empty quota buckets, unknown ownership and unpreserved
+configuration to its safety gate. It neither claimed nor submitted production
+continuation intents, and its transport excluded resume/start. The subsequently
+added managed path is described above and in [the protocol audit](protocol-audit.md).
+
+Fixture tests proved deterministic decisions, not that a real Desktop chat had
+safely resumed. Successful builds proved compilation, not installation, signing
+or a real quota-recovery cycle.
+
+## Historical live read-only probe
 
 The local macOS probe returned the following results against installed `codex-cli 0.145.0`:
 
@@ -26,7 +127,7 @@ The local macOS probe returned the following results against installed `codex-cl
 
 Only the presence and shape of results are recorded. Private thread names, conversation content, paths, email addresses, quota values, and credentials are excluded from this document. The probe did not resume a thread, start a turn, approve an action, or consume reset credits. Its result is a point-in-time connectivity check, not evidence that account limits or login state remain unchanged.
 
-## Automated checks
+## Historical automated checks
 
 Local macOS ARM64 results (2026-10-20):
 
@@ -52,7 +153,10 @@ The probe-discovery tests simulate Windows filesystem layouts (PATH, APPDATA, ex
 
 The Rust transport tests use in-memory JSONL byte streams, including handshake ordering, response correlation, rejection of approval/credential requests, malformed responses, EOF, timeout, and the blocked write-method boundary. The scheduler's full continuation path is a fixture-based simulation only.
 
-The native test did not add or enable any real task. App data contains an empty task list. Native tests do not yet establish tray-menu interaction, a forced simultaneous second process, Windows behavior, code signing, or notarization. The macOS app is a local development artifact, not a public release.
+The historical native test did not add or enable any real task; its application
+data had an empty task list. It did not establish tray-menu interaction, a forced
+simultaneous second process, Windows behavior, code signing or notarization. That
+macOS app was a local development artifact.
 
 The repository's [CI workflow](../.github/workflows/ci.yml) defines independent `macos-latest` and `windows-latest` jobs:
 
@@ -63,7 +167,7 @@ The repository's [CI workflow](../.github/workflows/ci.yml) defines independent 
 
 The workflow does not install Codex, access an account, issue inference, publish artifacts, create a release, sign, or notarize an application.
 
-### Verified GitHub Actions run
+### Historical verified GitHub Actions run
 
 [Run 39366176954](https://github.com/Wu-Zzz/codex-autoresume/actions/runs/39366176954) completed successfully on 2026-10-20 for code commit `63c0658ce1b001765e533bf3bfd2028b000391c1`:
 
@@ -74,7 +178,7 @@ The workflow does not install Codex, access an account, issue inference, publish
 
 This establishes cloud compilation and automated checks on both operating systems for the identified commit. It does not establish Windows GUI behavior, installation, signing, account discovery on a fresh machine, or safe real-account continuation. Later revisions need their own checks.
 
-### Native minimal UI revision and capability correction
+### Historical native minimal UI revision and capability correction
 
 On 2026-10-20, the interface was simplified to one toolbar, a flat task list, and explicit monitoring switches. The runtime's user-facing messages and documentation now distinguish the implemented observation client from the unimplemented continuation path. Demo fixtures no longer imply a working live quota countdown.
 
@@ -102,7 +206,7 @@ npm run tauri -- build --no-bundle
 
 The live probe is intentionally separate from these commands. Run it only when an account read is authorized; it must keep its method allowlist read-only.
 
-### Dark UI and installer prerelease
+### Historical dark UI and installer prerelease preparation
 
 The `v0.1.0-alpha.1` revision implements the accepted dark Figma direction in Vue, with a 960 × 640 main window and a separate 380 × 560 tray window. The native tray and main window share the same Rust state. No continuation protocol methods were enabled.
 
@@ -118,10 +222,17 @@ This is an unsigned/unnotarized developer-identity preview, not a verified autom
 
 ## Checks still needed for general availability
 
-- Test installation and GUI behavior on Windows; the Mac and Windows cloud build results are recorded above.
+- Finish final code review, current-revision automated tests, dual-platform CI and
+  package checks. Do not reuse historical or intermediate passes for this gate.
+- Test installation and GUI behavior on Windows, including official login and
+  `CREATE_NEW_CONSOLE`; the historical cloud builds above do not validate the
+  current terminal implementation.
 - Complete tray-menu interaction, forced concurrent-instance handling, and Windows lifecycle checks; basic macOS opening, close/reopen, and explicit quit were exercised above.
 - Test official Codex executable discovery and explicit login handoff on fresh Mac and Windows installations.
 - Verify that logs, storage, UI errors, and diagnostic exports contain no credentials or unintended conversation content.
-- Prove ownership and configuration preservation before enabling any automated turn submission; the current external-chat path is intentionally blocked.
-- Test real quota exhaustion and recovery on a disposable, explicitly authorized task, including lost response and simultaneous manual-input cases.
+- Validate the managed warm-session ownership and configuration boundary end to
+  end, including safe refusal after disconnect/restart. External-chat execution
+  and automatic cold resume remain unsupported.
+- Test real inference, quota exhaustion and recovery on a disposable, explicitly
+  authorized task, including lost response and simultaneous manual-input cases.
 - Obtain developer code-signing credentials, notarize the Mac build, and complete fresh-machine installation and lifecycle validation.

@@ -29,7 +29,7 @@ impl Drop for Rpc {
     }
 }
 
-fn executable() -> Option<PathBuf> {
+pub(crate) fn executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CODEX_BIN").map(PathBuf::from) {
         return path.is_file().then_some(path);
     }
@@ -57,7 +57,7 @@ fn executable() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-fn command(path: &std::path::Path) -> Result<Command, String> {
+pub(crate) fn command(path: &std::path::Path) -> Result<Command, String> {
     // npm launchers need Node on PATH when the application is launched from Finder.
     // On Windows, launch npm's JS entry with Node directly instead of a shell.
     let mut cmd = if path.extension().is_some_and(|e| e == "cmd" || e == "ps1") {
@@ -113,7 +113,7 @@ impl Rpc {
     }
 
     // Both a child process and test fixtures use the same bounded JSONL transport.
-    fn from_io(
+    pub(crate) fn from_io(
         child: Option<Child>,
         input: impl AsyncWrite + Unpin + Send + 'static,
         stdout: impl AsyncRead + Unpin + Send + 'static,
@@ -191,6 +191,10 @@ impl Rpc {
             .map_err(|_| "Codex 连接已断开".to_string())
     }
 
+    pub fn is_usable(&self) -> bool {
+        !self.unusable
+    }
+
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         if self.unusable {
             return Err("Codex 连接已关闭，请重新连接".into());
@@ -235,21 +239,30 @@ impl Rpc {
                 }
                 if let Some(error) = value.get("error") {
                     // Do not leak server errors containing user paths, content or credentials to logs.
-                    let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
-                    return Err(format!("Codex 请求失败（{method}，错误 {code}）"));
+                    let code = error.get("code").and_then(Value::as_i64)
+                        .ok_or("Codex 返回结果格式不兼容")?;
+                    if error.get("message").and_then(Value::as_str).is_none() {
+                        return Err("Codex 返回结果格式不兼容".into());
+                    }
+                    // A correlated RPC rejection is a complete response. The
+                    // transport is healthy and unrelated reads may continue.
+                    return Ok(Err(format!("Codex 请求失败（{method}，错误 {code}）")));
                 }
-                return value.get("result").cloned().ok_or("Codex 返回结果格式不兼容".into());
+                return value.get("result").cloned().map(Ok).ok_or("Codex 返回结果格式不兼容".into());
             }
         }).await.unwrap_or_else(|_| Err("Codex 请求超时，请重新连接".into()));
-        if result.is_err() {
-            // A timeout or lost response is not permission to replay an operation.
-            // Retire this transport, including the login exception, before returning.
-            self.unusable = true;
-            self.reader.abort();
-            self.child.take(); // kill_on_drop was set when spawning the process.
-            let _ = self.input.shutdown().await;
+        match result {
+            Ok(response) => response,
+            Err(error) => {
+                // A timeout or lost response is not permission to replay an operation.
+                // Retire this transport, including the login exception, before returning.
+                self.unusable = true;
+                self.reader.abort();
+                self.child.take(); // kill_on_drop was set when spawning the process.
+                let _ = self.input.shutdown().await;
+                Err(error)
+            }
         }
-        result
     }
 }
 
@@ -271,6 +284,29 @@ mod tests {
 
     type FixtureReader = BufReader<ReadHalf<DuplexStream>>;
     type FixtureWriter = WriteHalf<DuplexStream>;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn npm_launcher_finds_its_sibling_node_when_started_outside_a_shell() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let launcher = directory.path().join("codex");
+        let node = directory.path().join("node");
+        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(&node, "#!/bin/sh\nprintf 'fixture-node\\n'\n").unwrap();
+        for path in [&launcher, &node] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = command(&launcher)
+            .unwrap()
+            .arg("--version")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixture-node\n");
+    }
 
     fn fixture() -> (Rpc, FixtureReader, FixtureWriter) {
         let (client, server) = tokio::io::duplex(64 * 1024);
@@ -423,6 +459,8 @@ mod tests {
             "{\"id\":1,\"result\":{},\"error\":{\"code\":1}}\n",
             "{\"method\":false,\"id\":1}\n",
             "{\"unexpected\":true}\n",
+            "{\"id\":1,\"error\":{\"code\":\"invalid\",\"message\":\"private\"}}\n",
+            "{\"id\":1,\"error\":{\"code\":-32000}}\n",
         ] {
             let (mut rpc, mut reader, mut writer) = fixture();
             let server = tokio::spawn(async move {
@@ -508,12 +546,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_error_exposes_only_method_and_code() {
+    async fn remote_error_exposes_only_method_and_code_and_keeps_transport_usable() {
         let (mut rpc, mut reader, mut writer) = fixture();
         let server = tokio::spawn(async move {
             let request = read_message(&mut reader).await;
             write_message(&mut writer, json!({"id":request["id"],"error":{"code":-32000,"message":"fixture-secret-content","data":{"token":"fixture-secret-token"}}})).await;
-            expect_eof(&mut reader).await;
+            let next = read_message(&mut reader).await;
+            assert_eq!(next["method"], "thread/list");
+            write_message(
+                &mut writer,
+                json!({"id":next["id"],"result":{"data":[],"nextCursor":null}}),
+            )
+            .await;
         });
         let error = rpc
             .request("account/read", json!({"refreshToken":false}))
@@ -522,6 +566,11 @@ mod tests {
         assert!(error.contains("account/read"));
         assert!(error.contains("-32000"));
         assert!(!error.contains("fixture-secret"));
+        assert!(rpc.is_usable());
+        assert_eq!(
+            rpc.request("thread/list", json!({})).await.unwrap()["data"],
+            json!([])
+        );
         server.await.unwrap();
     }
 

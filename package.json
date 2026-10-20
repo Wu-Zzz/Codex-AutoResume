@@ -4,6 +4,7 @@
   "version": "0.1.0-alpha.1",
   "type": "module",
   "scripts": {
+    "icons": "node scripts/generate-icons.mjs",
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "check": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",

@@ -5,6 +5,8 @@ import { call, demo, desktop, errorMessage, formatTime, projectName } from './ap
 import type { Candidate, Snapshot, TaskView } from './types'
 import TaskCard from './components/TaskCard.vue'
 import TaskInspector from './components/TaskInspector.vue'
+import QuotaCard from './components/QuotaCard.vue'
+import { useTheme } from './theme'
 import appMark from './assets/icon.svg'
 import pauseIcon from './assets/figma/workbench-DarkIconPause.svg'
 import expandIcon from './assets/figma/tray-DarkIconExpand.svg'
@@ -27,6 +29,12 @@ const candidatesDialog = ref<HTMLDialogElement | null>(null)
 const connectionDialog = ref<HTMLDialogElement | null>(null)
 const capabilityDialog = ref<HTMLDialogElement | null>(null)
 const compactDetailDialog = ref<HTMLDialogElement | null>(null)
+const appearanceMenu = ref<HTMLDetailsElement | null>(null)
+const { preference: themePreference } = useTheme()
+const candidateTab = ref<'new' | 'existing'>('new')
+const projectPath = ref('')
+const autoResume = ref(false)
+const launchError = ref('')
 const candidates = ref<Candidate[]>([])
 const candidatesLoading = ref(false)
 const candidatesError = ref('')
@@ -60,6 +68,11 @@ let pendingRefresh: Promise<void> | null = null
 let disposed = false
 let pollTimer: ReturnType<typeof setInterval> | undefined
 let unlistenSelection: (() => void) | undefined
+let unlistenAddTask: (() => void) | undefined
+
+function dismissAppearance(event: PointerEvent) {
+  if (event.target instanceof Node && !appearanceMenu.value?.contains(event.target)) appearanceMenu.value?.removeAttribute('open')
+}
 
 function showDialog(dialog: HTMLDialogElement | null) {
   if (!dialog || dialog.open) return
@@ -111,11 +124,10 @@ async function mutate(command: string, args?: Record<string, unknown>, key = com
   }
 }
 
-async function openCandidates() {
+async function loadCandidates() {
   candidateSearch.value = ''
   candidatesError.value = ''
   candidates.value = []
-  showDialog(candidatesDialog.value)
   candidatesLoading.value = true
   try {
     candidates.value = await call<Candidate[]>('list_candidates')
@@ -123,6 +135,48 @@ async function openCandidates() {
     candidatesError.value = errorMessage(cause)
   } finally {
     candidatesLoading.value = false
+  }
+}
+
+function openCandidates() {
+  if (tray) {
+    if (desktop) void call<void>('show_main_window', { threadId: null, addTask: true }).catch(cause => { error.value = errorMessage(cause) })
+    else {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('view')
+      url.searchParams.set('addTask', '1')
+      window.location.assign(url)
+    }
+    return
+  }
+  candidateTab.value = 'new'
+  projectPath.value = ''
+  autoResume.value = false
+  launchError.value = ''
+  showDialog(candidatesDialog.value)
+}
+
+async function showExisting() {
+  candidateTab.value = 'existing'
+  await loadCandidates()
+}
+
+async function chooseProject() {
+  launchError.value = ''
+  try {
+    const selected = await call<string | null>('choose_project')
+    if (selected) projectPath.value = selected
+  } catch (cause) { launchError.value = errorMessage(cause) }
+}
+
+async function launchManaged() {
+  if (!projectPath.value.trim() || busy.value.has('launch_managed')) return
+  launchError.value = ''
+  const result = await mutate('launch_managed', { cwd: projectPath.value.trim(), autoResume: autoResume.value })
+  if (result) candidatesDialog.value?.close()
+  else {
+    launchError.value = error.value
+    error.value = ''
   }
 }
 
@@ -163,6 +217,7 @@ async function removeTask() {
 }
 
 onMounted(async () => {
+  document.addEventListener('pointerdown', dismissAppearance)
   selectedTaskId.value = new URLSearchParams(window.location.search).get('task') ?? ''
   if (desktop && !tray) {
     try {
@@ -175,9 +230,13 @@ onMounted(async () => {
       })
       if (disposed) unlisten()
       else unlistenSelection = unlisten
+      const stopAddTask = await listen('add-task', openCandidates)
+      if (disposed) stopAddTask()
+      else unlistenAddTask = stopAddTask
     } catch (cause) { error.value = errorMessage(cause) }
   }
   await refresh()
+  if (!tray && new URLSearchParams(window.location.search).get('addTask') === '1') openCandidates()
   // This only refreshes the Rust-owned view; no scheduling or continuation runs in Vue.
   if (!disposed) pollTimer = setInterval(() => { void refresh() }, 3000)
 })
@@ -185,6 +244,8 @@ onBeforeUnmount(() => {
   disposed = true
   if (pollTimer) clearInterval(pollTimer)
   unlistenSelection?.()
+  unlistenAddTask?.()
+  document.removeEventListener('pointerdown', dismissAppearance)
 })
 </script>
 
@@ -195,28 +256,33 @@ onBeforeUnmount(() => {
       <div class="brand" data-tauri-drag-region><img class="brand-icon" :src="appMark" alt=""/><h1 data-tauri-drag-region>{{ tray ? 'AutoResume' : 'Codex AutoResume' }}</h1><span v-if="tray" class="connection-dot" :class="snapshot.connection" :title="connectionLabel" :aria-label="connectionLabel"/></div>
       <div class="header-actions">
         <button v-if="!tray" class="connection-button" :class="snapshot.connection" aria-label="查看连接状态" @click="showDialog(connectionDialog)"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
-        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-label="snapshot.pausedAll ? '恢复全部监测' : '暂停全部监测'" :title="snapshot.pausedAll ? '恢复全部监测' : '暂停全部监测'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><span v-if="snapshot.pausedAll" class="play-icon" aria-hidden="true"/><img v-else :src="pauseIcon" alt=""/></button>
-        <button v-if="!tray" class="button primary" :disabled="!connected || loading" @click="openCandidates">添加任务</button>
+        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-label="snapshot.pausedAll ? '恢复全部' : '暂停全部'" :title="snapshot.pausedAll ? '恢复全部' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><span v-if="snapshot.pausedAll" class="play-icon" aria-hidden="true"/><img v-else :src="pauseIcon" alt=""/></button>
+        <details ref="appearanceMenu" class="appearance-menu" @keydown.esc="appearanceMenu?.removeAttribute('open')">
+          <summary class="icon-button" aria-label="外观" title="外观"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg></summary>
+          <div class="appearance-options" role="group" aria-label="选择外观"><button v-for="option in ([{ value: 'dark', label: '深色' }, { value: 'light', label: '浅色' }, { value: 'system', label: '跟随系统' }] as const)" :key="option.value" :aria-pressed="themePreference === option.value" @click="themePreference = option.value; appearanceMenu?.removeAttribute('open')"><span>{{ option.label }}</span><span v-if="themePreference === option.value" aria-hidden="true">✓</span></button></div>
+        </details>
+        <button v-if="!tray" class="button primary" :disabled="loading" @click="openCandidates">添加任务</button>
       </div>
     </header>
     <div class="capability-bar">
-      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">仅监测<span aria-hidden="true">·</span>自动续跑未开放</button>
-      <span v-if="snapshot.pausedAll" class="paused-label" role="status">监测已暂停</span>
+      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">已有会话仅监测</button>
+      <span v-if="snapshot.pausedAll" class="paused-label" role="status">已全部暂停</span>
     </div>
     <div v-if="error && !candidatesDialog?.open && !connectionDialog?.open" class="error-notice" role="alert"><p>{{ error }}</p><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><img :src="closeIcon" alt=""/></button></div>
     <main class="workspace">
-      <section class="task-sidebar" aria-label="监测任务">
+      <section class="task-sidebar" aria-label="任务列表">
+        <QuotaCard :quota="snapshot.quota"/>
         <template v-if="!tray">
-          <label class="search-field"><img :src="searchIcon" alt=""/><input v-model="taskSearch" type="search" placeholder="搜索任务或项目" aria-label="搜索监测任务" autocomplete="off"/></label>
+          <label class="search-field"><img :src="searchIcon" alt=""/><input v-model="taskSearch" type="search" placeholder="搜索任务或项目" aria-label="搜索任务" autocomplete="off"/></label>
           <div class="task-filters" aria-label="按任务状态筛选">
             <button :class="{ active: taskFilter === 'all' }" :aria-pressed="taskFilter === 'all'" @click="taskFilter = 'all'"><img v-if="taskFilter === 'all'" :src="blueDot" alt=""/>全部 {{ snapshot.tasks.length }}</button>
             <button :class="{ active: taskFilter === 'waiting_quota' }" :aria-pressed="taskFilter === 'waiting_quota'" @click="taskFilter = 'waiting_quota'">等待 {{ waitingCount }}</button>
             <button :class="{ active: taskFilter === 'needs_attention' }" :aria-pressed="taskFilter === 'needs_attention'" @click="taskFilter = 'needs_attention'">需处理 {{ attentionCount }}</button>
           </div>
         </template>
-        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>监测</span></div>
+        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>{{ snapshot.tasks.filter(task => task.mode === 'managed').length }} 个托管</span></div>
         <div v-if="loading" class="empty-state" aria-live="polite"><span class="spinner" aria-hidden="true"/><p>正在连接 Codex…</p></div>
-        <div v-else-if="!snapshot.tasks.length" class="empty-state"><span class="empty-mark" aria-hidden="true">＋</span><h2>暂无任务</h2><p>{{ connected ? '添加一个本地 Codex 任务' : '请先连接本机 Codex' }}</p></div>
+        <div v-else-if="!snapshot.tasks.length" class="empty-state"><span class="empty-mark" aria-hidden="true">＋</span><h2>暂无任务</h2><p>从添加任务开始</p></div>
         <div v-else-if="!filteredTasks.length" class="empty-state"><p>没有匹配的任务</p></div>
         <div v-else class="task-list">
           <TaskCard v-for="task in filteredTasks" :key="task.id" :task="task" :selected="!tray && selectedTaskId === task.id" :busy="busy.has(task.id)" :paused-all="snapshot.pausedAll" @select="selectTask(task)" @toggle="mutate('set_task_enabled', { threadId: task.id, enabled: !task.enabled }, task.id)"/>
@@ -228,7 +294,7 @@ onBeforeUnmount(() => {
       </div>
     </main>
     <footer v-if="tray" class="tray-footer">
-      <button class="button secondary" :disabled="!connected || loading" @click="openCandidates">添加任务</button>
+      <button class="button secondary" :disabled="loading" @click="openCandidates">添加任务</button>
       <div class="footer-actions"><button class="icon-button" aria-label="打开主窗口" title="打开主窗口" @click="openMain()"><img :src="expandIcon" alt=""/></button><button class="icon-button" aria-label="查看连接状态" title="查看连接状态" @click="showDialog(connectionDialog)"><img :src="settingsIcon" alt=""/></button></div>
     </footer>
     <dialog ref="connectionDialog" class="dialog connection-dialog" aria-labelledby="connection-title" @close="restoreFocus">
@@ -247,15 +313,28 @@ onBeforeUnmount(() => {
       </div>
     </dialog>
     <dialog ref="capabilityDialog" class="dialog capability-dialog" aria-labelledby="capability-title" @close="restoreFocus">
-      <div class="dialog-header"><h2 id="capability-title">当前仅支持监测</h2><button class="icon-button" aria-label="关闭能力说明" autofocus @click="capabilityDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
-      <p class="dialog-description">开关控制本工具的任务监测。自动续跑尚未实现，当前版本不会启动或恢复 Codex 任务。</p>
-      <p class="capability-reason">{{ snapshot.compatibilityMessage || '安全接管原会话的能力尚未验证。请在 Codex 中继续任务。' }}</p>
+      <div class="dialog-header"><h2 id="capability-title">续跑范围</h2><button class="icon-button" aria-label="关闭能力说明" autofocus @click="capabilityDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
+      <p class="dialog-description">从本工具新建的任务在官方终端中运行，单独授权后可等待额度并续跑。已有 Desktop 或终端会话只做监测，不会自动接管。</p>
+      <p class="capability-reason">{{ snapshot.compatibilityMessage || '托管续跑仍处于测试阶段。遇到审批、用户停止或执行状态不明时会暂停，等待你处理。' }}</p>
     </dialog>
     <dialog ref="candidatesDialog" class="dialog candidate-dialog" aria-labelledby="candidate-title" @close="restoreFocus">
-      <div class="dialog-header"><h2 id="candidate-title">添加本地任务</h2><button class="icon-button" aria-label="关闭任务选择" @click="candidatesDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
-      <label class="search-field"><img :src="searchIcon" alt=""/><input v-model="candidateSearch" type="search" placeholder="搜索任务或项目" aria-label="搜索本地任务" autocomplete="off" autofocus/></label>
+      <div class="dialog-header"><h2 id="candidate-title">添加任务</h2><button class="icon-button" aria-label="关闭任务选择" @click="candidatesDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
+      <div class="add-task-tabs" role="tablist" aria-label="添加方式">
+        <button role="tab" :aria-selected="candidateTab === 'new'" aria-controls="new-task-panel" @click="candidateTab = 'new'">新建任务</button>
+        <button role="tab" :aria-selected="candidateTab === 'existing'" aria-controls="existing-task-panel" @click="showExisting">已有会话</button>
+      </div>
+      <form v-if="candidateTab === 'new'" id="new-task-panel" class="new-task-form" role="tabpanel" @submit.prevent="launchManaged">
+        <label class="project-label" for="project-path">项目文件夹</label>
+        <div class="project-picker"><input id="project-path" v-model="projectPath" placeholder="选择项目文件夹" autocomplete="off" spellcheck="false"/><button type="button" class="button secondary" @click="chooseProject">选择</button></div>
+        <label class="auto-resume-option"><input v-model="autoResume" type="checkbox"/><span><strong>额度恢复后自动续跑</strong><span>仅对此次新建任务生效</span></span></label>
+        <p class="launch-description">将在官方 Codex 终端中开始任务。托管环境独立，首次使用需完成官方登录。</p>
+        <p v-if="launchError" class="dialog-error" role="alert">{{ launchError }}</p>
+        <div class="dialog-footer launch-actions"><button class="button primary" type="submit" :disabled="!projectPath.trim() || busy.has('launch_managed')">{{ busy.has('launch_managed') ? '正在打开…' : '打开 Codex 终端' }}</button></div>
+      </form>
+      <section v-else id="existing-task-panel" role="tabpanel">
+      <label class="search-field"><img :src="searchIcon" alt=""/><input v-model="candidateSearch" type="search" placeholder="搜索任务或项目" aria-label="搜索本地任务" autocomplete="off"/></label>
       <div class="candidate-toolbar"><span class="filter-label"><img :src="blueDot" alt=""/>全部会话</span><span>最近活动 ↓</span></div>
-      <div v-if="candidatesError" class="dialog-error" role="alert">{{ candidatesError }}<button class="text-button" :disabled="candidatesLoading" @click="openCandidates">重试</button></div>
+      <div v-if="candidatesError" class="dialog-error" role="alert">{{ candidatesError }}<button class="text-button" :disabled="candidatesLoading" @click="loadCandidates">重试</button></div>
       <div v-else-if="candidatesLoading" class="candidate-empty" aria-live="polite"><span class="spinner" aria-hidden="true"/><p>正在读取本地任务…</p></div>
       <div v-else-if="!filteredCandidates.length" class="candidate-empty"><p>{{ candidateSearch ? '没有匹配的任务' : '暂无可添加的任务' }}</p></div>
       <div v-else class="candidate-list">
@@ -265,6 +344,7 @@ onBeforeUnmount(() => {
         </article>
       </div>
       <p class="candidate-note">加入后默认关闭监测；不会执行原任务。</p>
+      </section>
     </dialog>
     <dialog ref="compactDetailDialog" class="dialog compact-detail-dialog" aria-label="任务详情" @close="restoreFocus">
       <button class="icon-button compact-detail-close" aria-label="关闭任务详情" autofocus @click="compactDetailDialog?.close()"><img :src="closeIcon" alt=""/></button>

@@ -49,6 +49,8 @@ pub struct TaskRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
+    pub mode: &'static str,
+    pub can_enable: bool,
     pub id: String,
     pub title: String,
     pub cwd: String,
@@ -62,6 +64,8 @@ pub struct TaskView {
 impl From<&TaskRecord> for TaskView {
     fn from(task: &TaskRecord) -> Self {
         Self {
+            mode: "monitor",
+            can_enable: true,
             id: task.id.clone(),
             title: task.title.clone(),
             cwd: task.cwd.clone(),

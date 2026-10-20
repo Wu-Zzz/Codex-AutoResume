@@ -1,6 +1,9 @@
 # Codex App Server integration audit
 
 Checked 2026-10-20 (Asia/Taipei). Installed executable: `codex-cli 0.145.0`.
+The managed execution revision below is **in progress**: final adversarial review,
+packaged native checks and release validation have not yet closed. Current local
+automated results are recorded separately in [VALIDATION.md](VALIDATION.md).
 
 ## Conclusion
 
@@ -8,9 +11,113 @@ Automatic recovery from a **confirmed quota failure in a session that this app o
 
 **Transparent takeover of arbitrary existing Codex Desktop or CLI sessions is not yet established as safe.** A new app-server can discover persisted history, but its `notLoaded` status does not prove that a different Desktop/CLI process is idle. The inspected schema exposes no cross-process ownership lease, compare-and-swap turn start, or documented exactly-once send operation. Do not ship unattended takeover based only on file timestamps, process-name checks, or a new server's runtime status.
 
-A first implementation can safely deliver read-only discovery, explicit selection, quota status, a durable state machine, and a tested transport adapter. Automatic execution should require a proven ownership path, rather than displaying a successful automation toggle for a path that has only been simulated.
+The earlier revision implemented observation only. The working tree now adds a
+separate managed execution path for **new tasks started through this application**.
+That is an implementation change, not evidence that a real quota interruption has
+recovered successfully. Existing Desktop/CLI histories remain observation only,
+and their monitoring selections are never migrated into execution consent.
 
-## Evidence and version boundary
+## Current managed path — validation in progress
+
+The implementation in `src-tauri/src/managed.rs` owns a private application
+`CODEX_HOME`, a loopback gateway and a separate official stdio backend for each
+managed launch. It does not attach to an arbitrary running Desktop backend. The
+user selects the project and grants separate automatic-continuation consent, then
+uses the **official Codex terminal** for the task, approvals and answers.
+
+The launcher first checks official `codex login status` in that same managed home.
+If login is needed, it runs official `codex login` and checks again before opening
+the remote terminal. A successful status exit alone does not establish a ChatGPT
+account: the gateway additionally requires the structured `account/read` type to
+be `chatgpt` before creating a managed thread. It does not accept API-key login
+payloads or switch payment modes.
+
+The backend starts lazily after the authenticated native client connects. This
+ordering matters in 0.145.0: `AuthManager::auth()` returns from an empty cached
+value without loading newly created login state, and the provider's account read
+uses `auth_cached()`. Starting the backend before a separate official login could
+therefore leave it unauthenticated. The implementation does not solve this by
+reading or copying credentials. These findings come from the inspected
+[`AuthManager` source](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/login/src/auth/manager.rs#L2023)
+and [provider account source](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/model-provider/src/provider.rs#L285).
+
+The ownership boundary is one still-live backend generation:
+
+- The loopback gateway requires a generated local channel capability, rejects
+  browser-origin connections and permits one connected native client. The
+  capability is not an OpenAI credential and is not exposed to the webview or
+  placed in command arguments. The macOS launcher uses a mode-0600 one-use file;
+  Windows passes it only in the remote process environment. Official login keeps
+  responsibility for account credential storage.
+- One actor serializes native-client requests and automatic submissions to its
+  owned backend. A new user turn reserves that writer and invalidates an older
+  continuation check. The gateway refuses arbitrary external thread IDs, forks
+  and unverified protocol/configuration changes.
+- Only a structured terminal `usageLimitExceeded` for the current managed turn
+  can begin recovery. Fresh ChatGPT account state, complete quota state, current
+  history, idle status, consent, configuration and the live client generation
+  must still agree before an automatic turn is eligible.
+- The SQLite intent is claimed atomically before dispatch, keyed by thread and
+  failed turn. An existing claim cannot submit again. An uncertain acknowledgement
+  becomes ambiguous and disables further automatic work; it is not replayed.
+  This is an application safeguard, not a claim that the remote protocol provides
+  exactly-once delivery.
+- Automatic starts share one application-level slot. Approval/input requests
+  require the native user. User stop, login changes, configuration changes,
+  disconnect or backend loss revoke or pause automatic execution as appropriate.
+- Automatic continuation retains the warm session rather than reconstructing a
+  historical execution configuration. Application restart does not cold-resume
+  managed work or treat persisted consent as a live ownership lease. A terminal
+  rejoin is limited to the already-created session in its still-live backend.
+
+These are the implemented restrictions being reviewed and exercised with
+fixtures. **No real model inference or real quota-exhaustion/recovery test has
+been performed for this revision.** A concrete disposable-task execution test
+requires explicit authorization under [AGENTS.md](../AGENTS.md).
+
+### Quota parsing and display are separate
+
+The execution parser consumes complete `account/rateLimits/read` snapshots, not
+sparse notifications. It validates all known fields, ranges and nullable values;
+rejects unknown fields/enums and conflicting identities; reads every map bucket;
+and checks that the compatibility view agrees. Only a null map permits fallback
+to an explicitly identified single bucket. The managed path conservatively gates
+on **all returned buckets**, without guessing a model-to-bucket relationship.
+Unknown spend-control state remains blocking. Credits and reset credits never
+replace subscription-window availability.
+
+A separate display parser can show valid known measurements when strict
+execution parsing refuses a future or incomplete shape. Unavailable measurements
+remain `null`; it does not invent a percentage or a five-hour deadline. Display
+telemetry cannot grant permission to execute. Failed reads, lost connections and
+missing login clear stale telemetry; pausing task monitoring does not stop quota
+refresh. When a managed account is connected, the application uses that managed
+telemetry rather than assuming it matches the ordinary local Codex account.
+
+### Connection error correction and read-only evidence
+
+The observation transport previously closed its child for any JSON-RPC error.
+The runtime could then retain that unusable connection, fail subsequent task
+reads and report the disconnect only in a later refresh. The correction treats a
+valid correlated RPC rejection separately from a malformed frame, EOF or timeout.
+Only damaged/uncertain transports are retired; they are cleared immediately and
+their requests are not replayed. One unavailable history no longer invalidates
+other history reads.
+
+On the installed 0.145.0 binary, a deliberately nonexistent synthetic thread ID
+returned RPC code `-32600`; the next `account/read` on the **same connection**
+succeeded. Five consecutive read-only account/quota/list cycles also succeeded
+under a Finder-style minimal PATH. One real quota response passed the new strict
+parser through an in-memory validation pipe. No account identity, quota
+percentages, conversation content or credentials were retained in this record.
+These samples establish this particular error-handling defect and basic
+compatibility, not long-duration connection reliability.
+
+## Historical protocol audit and version boundary
+
+The following initial audit evidence remains relevant to the 0.145.0 protocol.
+Its observation-only implementation statements describe the earlier baseline;
+they are not validation of the new managed path.
 
 - Official [App Server documentation](https://learn.chatgpt.com/docs/app-server) was searched and fetched before inspecting the local executable. It documents thread lifecycle, read/list/resume, quotas, approvals, and transports.
 - Ran `codex --version`, app-server/daemon/proxy help, and both stable and experimental TypeScript schema generation. Generated scratch references are under `work/protocol-schema/` and `work/protocol-schema-experimental/`.
@@ -104,10 +211,21 @@ A safer managed architecture is: AutoResume owns one backend and mediates **all*
 
 ## Release gates still required
 
-- A tested ownership handoff/shared-backend path for each claimed Desktop/CLI integration; current public evidence does not close this gate.
-- Demonstrate preservation of model, provider, reasoning effort, cwd, permission profile/sandbox, workspace roots, approvals routing, instructions, and required tools across a backend restart.
-- Lost acknowledgement, simultaneous user message, two app instances, sleep/wake, stale quota notification, and multiple limit-bucket fixtures must fail safely.
-- Actual Mac and Windows packaged-app smoke tests, including executable discovery, child process lifetime, tray shutdown/relaunch, and login handoff.
-- A controlled live quota-failure/recovery run on an explicitly authorized disposable task. The audit intentionally did not consume inference or exercise a real user's quota boundary.
+- Close final code review and rerun the full current-revision checks after the
+  managed actor and failure fixtures have settled. Intermediate test counts do
+  not establish a completed release gate.
+- Validate the warm managed path end to end: official login, native TUI,
+  permissions/configuration, manual input racing an automatic check, lost
+  acknowledgement, sleep/wake and safe refusal after a backend restart.
+- Validate current macOS and Windows packages, including discovery, terminal
+  launch, child lifetime, tray shutdown/relaunch and fresh-machine login.
+  Windows `CREATE_NEW_CONSOLE` handling still needs current-revision CI and
+  Windows real-machine verification.
+- Run a controlled real quota-failure/recovery test on a specifically authorized
+  disposable task. No such inference or recovery test has been performed.
+- Any future claim of external Desktop/CLI takeover or cold resume needs its own
+  ownership/configuration evidence. Neither capability is claimed by the current
+  managed warm-session design.
 
-These gaps limit the claim of readiness; they do not prevent building the UI, durable scheduler, protocol adapter, and deterministic test suite now.
+See [VALIDATION.md](VALIDATION.md) for the separation between historical checks,
+current fixture/read-only results and outstanding release verification.
