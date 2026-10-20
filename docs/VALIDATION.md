@@ -27,9 +27,10 @@ over unrelated sessions. Independent source review and local macOS packaging che
 | Strict quota parser and separate display telemetry | Targeted parser/scheduler checks passed; display unknowns remain unknown and cannot authorize execution |
 | Integrated Rust tests | 80 passed locally, including managed actor, persistence, connection, quota and synthetic terminal/login cases |
 | Rust formatting and Clippy | Passed; Clippy covered all targets with warnings denied |
-| New macOS ARM64 application and DMG | Built: app 14.57 MiB, DMG 4.62 MiB; strict ad-hoc signature and disk-image integrity checks passed |
-| Current macOS/Windows CI | [Run 39404011614](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39404011614), commit `a60bfd958f5b01bdb66047647a396281fc439312`, both macOS and Windows passed all tests, static checks and release application compilation; not a published release |
+| Current macOS ARM64 application and DMG | Rebuilt with the corrected Mac icon: app 14.57 MiB, DMG 4.63 MiB; strict ad-hoc signature and disk-image integrity checks passed |
+| Last completed macOS/Windows CI | [Run 39404011614](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39404011614), commit `a60bfd958f5b01bdb66047647a396281fc439312`, both macOS and Windows passed all tests, static checks and release application compilation; predates the icon correction and is not a published release |
 | Windows `CREATE_NEW_CONSOLE` terminal/login behavior | Compiled and tested in current Windows CI; real-machine terminal/login GUI verification still required |
+| Authorized isolated terminal launch | Official terminal opened from the application for `work/live-smoke`, with automatic continuation off; login/input handoff pending and no model prompt sent |
 | Real managed model inference | **Not performed** |
 | Real quota exhaustion and automatic recovery | **Not performed** |
 | Signing/notarization and fresh-machine acceptance | Not established for this revision |
@@ -41,7 +42,22 @@ Independent review found and resolved official TUI optional-field compatibility 
 current local pass; any subsequent code correction requires the affected checks
 to be rerun. They are not proof of real quota recovery or package acceptance.
 
-### Current packaged Mac UI check
+### Mac icon correction and package check
+
+The Mac icon generator previously removed the canonical SVG root and lost its
+inherited `fill="none"`, leaving the open C-loop filled black. It now nests the
+complete source SVG, preserving its paint attributes and the existing 80%
+optical size. The generated ICNS was decoded and visually inspected; its center
+is forest green. The packaged ICNS matches that verified file byte for byte.
+
+Frontend type checking, production build, 15 frontend/probe tests, 80 Rust tests,
+formatting and Clippy passed again. The rebuilt ARM64 DMG SHA-256 is
+`dc30d26e48901ea16774af120a0a83c74556e5d71e7bff98fb19fa184fd41c3a`.
+The Mac was locked during the final native check. The running application was
+not restarted while the isolated test awaited user input, so refreshed Dock
+rendering has not been verified.
+
+### Earlier packaged Mac UI check (before the authorized smoke attempt)
 
 The newly built native application launched successfully. Its existing local
 account connection and live quota display were read-only. Native light/dark
@@ -53,7 +69,28 @@ check. Screenshots containing personal histories are not committed; public UI
 images use preview fixtures only. Actual tray-icon interaction and Windows GUI
 still need separate verification.
 
-### Current live read-only connection and quota checks
+### Authorized isolated smoke attempt
+
+The user explicitly authorized one new official Codex task in the ignored
+`work/live-smoke` directory, with the sole prompt:
+`只回复 AUTORESUME_SMOKE_OK，不调用工具，不读取或修改文件`.
+This authorization does not include additional model requests, deliberate quota
+exhaustion, or resuming or interrupting existing conversations.
+
+The application opened the official terminal for that isolated directory.
+Automatic continuation remained off. The computer-use tool denied control of
+the native Terminal application, so the test is pending a user handoff for
+official login and prompt input. The prompt has **not been sent**, successful
+login has not been established, and no model response has been validated.
+Launching the terminal alone does not establish that the authenticated CLI
+connection or real task execution works.
+
+No existing conversation was resumed or interrupted. Real managed inference and
+real quota exhaustion/recovery remain unverified. If this single request later
+succeeds, it can establish one normal managed execution only; it cannot establish
+automatic recovery across a quota window.
+
+### Earlier live read-only connection and quota checks
 
 The installed official CLI was `codex-cli 0.145.0`. A Finder-style minimal PATH
 successfully launched its npm entry and resolved the sibling Node executable.
@@ -75,12 +112,11 @@ spend-control state. The output recorded only parser success and structural
 availability. No account identity, actual quota percentages, reset timestamps,
 private task names or credentials are included here.
 
-All these real-account checks were read-only. They did not invoke login, resume,
-turn start, interruption, approval or inference. Native-launch/login tests use
-synthetic local CLI fixtures, not the user's official account. As required by
-[AGENTS.md](../AGENTS.md), a real execution/recovery test needs explicit
-authorization for a concrete disposable task; general development or release
-authorization does not substitute for that test scope.
+The checks in this earlier read-only subsection did not invoke login, resume,
+turn start, interruption, approval or inference. The automated native-launch/login
+tests used synthetic local CLI fixtures, not the user's official account.
+The separately authorized smoke attempt above has a narrower, explicit scope
+under [AGENTS.md](../AGENTS.md); it does not authorize a real quota-recovery test.
 
 ### Display and authentication boundaries
 

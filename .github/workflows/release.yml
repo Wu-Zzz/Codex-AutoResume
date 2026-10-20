@@ -153,7 +153,7 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" work/release-assets/* \
             --verify-tag --draft --prerelease \
-            --title "Codex AutoResume ${RELEASE_TAG} · 监测预览版" \
+            --title "Codex AutoResume ${RELEASE_TAG} · 新建托管任务 Alpha（已有会话仅监测）" \
             --notes-file "docs/releases/${RELEASE_TAG}.md"
           test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
