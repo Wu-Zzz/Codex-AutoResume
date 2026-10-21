@@ -1,6 +1,6 @@
 # 原 Desktop 聊天续跑（实验）
 
-这条实验通路旨在保留原 Codex Desktop、原聊天 ID、历史上下文与原客户端工具连接，不迁到终端。正常图标的一次性接入已编码，限定 macOS 默认 zsh 环境及 Desktop 构建 `20770`。**原 Desktop 实机与真实额度恢复尚未验收，新 Release 尚未发布。** 不替换官方应用，不修改官方数据库、凭据或 rollout。
+这条实验通路旨在保留原 Codex Desktop、原聊天 ID、历史上下文与原客户端工具连接，不迁到终端。限定 macOS 默认 zsh 环境及 Desktop 构建 `20770`。**本机已验证正常图标启动、原聊天连接和续跑开关；真实额度恢复尚未验收。** 不替换官方应用，不修改官方数据库、凭据或 rollout。
 
 ## 组成
 
@@ -9,15 +9,15 @@
 - Rust 调度器在真实额度放行后调用这项条件操作，发送前保存不可重复的意图。未知协议或提交结果不明时停止，不退回普通 `turn/start`。
 - AutoResume 显示当前桥接中已打开的聊天，开关默认关闭。工具调用、权限审批和用户输入不会转移到 AutoResume 界面。
 
-## 一次性接入（开发版本）
+## 一次性接入
 
 1. 在附有完整实验组件的 AutoResume 中打开 **Codex 连接 → 自动连接 Codex → 开启自动连接**。
 2. 首次设置后，正常退出 Codex，再从平时的 Dock / Applications 图标打开。以后无需专用启动器。
-3. 在原 Codex 中打开需要守护的聊天，再在 AutoResume 对该聊天单独开启续跑。接入安装不代表聊天已授权，也不代表已连接成功。
+3. 先在原 Codex 聊天中开始任务，再在 AutoResume 对该聊天单独开启续跑。接入安装不代表聊天已授权，也不代表已连接成功。
 
 接入在用户 `.zshrc` 中添加可移除的条件入口，仅在 Desktop 的 `CODEX_SHELL=1` 环境下生效；组件保存于 AutoResume 私有目录，不设置系统全局环境或登录服务。点击 **关闭自动连接** 可撤销设置；后续启动恢复官方 CLI。保留已有自定义 CLI 配置，冲突时拒绝启用。组件缺失、配置无效或 Desktop 版本变化时，在执行端启动前回退官方 CLI；已启动的执行端失败不会再启动第二个后端。
 
-已发布公共安装包未附完整执行端。当前源码遇到组件不完整会禁用入口。本地 debug 版本可使用下面生成的 `work/guarded-codex-build/bin/codex-app-server`；这不代表公开安装包已具备或通过桌面续跑验收。
+`v0.2.0-alpha.1` 的两个 Mac 安装包包含实验执行端，由对应架构的 GitHub runner 从固定上游源码构建；Intel Mac 尚未做实机验收。Windows 不包含该组件，不能开启原聊天续跑。自行构建时，组件不完整会禁用入口；本地 debug 可使用下面生成的 `work/guarded-codex-build/bin/codex-app-server`。
 
 ## 开发构建
 
@@ -63,4 +63,4 @@ node scripts/prepare-desktop-bridge.mjs \
 - 当前修改版执行程序未配套兼容的语音组件，不支持 Desktop 语音功能。
 - 没有防休眠功能。真实额度耗尽/恢复、桌面专属工具、Mac Intel 和 Windows 的实际使用仍需分别验收。
 
-当前验证证据见 [VALIDATION.md](VALIDATION.md)。模拟后端通过、协议结构一致与成功编译，不代表真实 Desktop 已完成验收。
+当前验证证据见 [VALIDATION.md](VALIDATION.md)。模拟后端通过、连接成功与开关可用，不代表已完成真实额度恢复续跑。

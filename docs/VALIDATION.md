@@ -4,6 +4,24 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## v0.2.0-alpha.1 packaging — 2026-10-21
+
+- The release workflow now builds and tests the modified backend separately on
+  native Apple Silicon and Intel runners, then bundles the matching artifact in
+  each Mac installer. Windows does not contain the Desktop runtime.
+- Runtime artifacts include the upstream license, notice, pinned-source manifest,
+  modification notice and commit/architecture/checksum provenance. Package checks
+  reject a wrong architecture, missing executable or mismatched artifact.
+- A local ARM64 debug app was built with the same resource mapping and ad-hoc
+  signing setting used by the release workflow. Bundled executable permissions,
+  architectures, provenance, byte-for-byte resource matches, backend `--help`
+  and strict signature verification passed. A wrong-architecture input was
+  correctly refused. No server, account or model call was made by these checks.
+- Workflow syntax, release-version consistency and release notes were checked.
+  The workflow creates the release only after both backend test jobs and all
+  three installer checks pass. Cloud packaging and public-download verification
+  for this revision are pending; the local debug bundle is not the release DMG.
+
 ## Native initialization handshake — 2026-10-21
 
 - The next normal-icon restart loaded the updated bridge without any unknown

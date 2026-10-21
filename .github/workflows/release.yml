@@ -4,29 +4,105 @@ on:
   push:
     tags: ["v*-alpha.*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the prerelease after all checks pass
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: prerelease-${{ github.ref }}
+  group: desktop-prerelease
   cancel-in-progress: false
 
 jobs:
-  package:
-    if: github.ref_type == 'tag'
-    name: Package ${{ matrix.platform }}
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Require matching versions and release notes
+        id: metadata
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const version = JSON.parse(readFileSync('package.json')).version;
+          if (!/^\d+\.\d+\.\d+-alpha\.\d+$/.test(version)) throw new Error('Only alpha versions may use this workflow');
+          const tag = `v${version}`;
+          if (process.env.GITHUB_REF_TYPE === 'tag' && process.env.GITHUB_REF_NAME !== tag) throw new Error('Tag does not match the package version');
+          const lock = JSON.parse(readFileSync('package-lock.json'));
+          if (lock.version !== version || lock.packages[''].version !== version) throw new Error('NPM lock version mismatch');
+          if (JSON.parse(readFileSync('src-tauri/tauri.conf.json')).version !== version) throw new Error('Tauri version mismatch');
+          const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8');
+          if (cargo.match(/^version = "([^"]+)"/m)?.[1] !== version) throw new Error('Cargo version mismatch');
+          const cargoLock = readFileSync('src-tauri/Cargo.lock', 'utf8').split('[[package]]').find(block => /^name = "codex-autoresume"$/m.test(block));
+          if (cargoLock?.match(/^version = "([^"]+)"/m)?.[1] !== version) throw new Error('Cargo lock version mismatch');
+          if (!readFileSync(`docs/releases/${tag}.md`, 'utf8').trim()) throw new Error('Release notes are empty');
+          appendFileSync(process.env.GITHUB_OUTPUT, `release_tag=${tag}\n`);
+          console.log(`Validated ${tag} at ${process.env.GITHUB_SHA}`);
+          JS
+
+  backend:
+    name: Build modified backend ${{ matrix.platform }}
+    needs: metadata
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      BUILD_TARGET: ${{ matrix.target }}
+      BUILD_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action, pinned compiler below
+        with:
+          toolchain: 1.95.0
+      - name: Build pinned modified backend and run isolated tests
+        run: node scripts/build-guarded-codex.mjs --test
+      - name: Stage licensed runtime and preserve executable permissions
+        run: |
+          node scripts/prepare-desktop-bundle.mjs stage --backend work/guarded-codex-build/bin/codex-app-server --output work/desktop-runtime --target "$BUILD_TARGET"
+          tar -czf "work/desktop-backend-$BUILD_PLATFORM.tar.gz" -C work/desktop-runtime codex-app-server LICENSE NOTICE upstream.json MODIFICATIONS.txt build-info.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-backend-${{ matrix.platform }}
+          path: work/desktop-backend-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Package ${{ matrix.platform }}
+    needs: [metadata, backend]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
             target: aarch64-apple-darwin
             platform: macos-arm64
             bundle: dmg
             bundles: app,dmg
             extension: dmg
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: macos-x64
             bundle: dmg
@@ -44,7 +120,7 @@ jobs:
       run:
         shell: bash
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
       BUILD_TARGET: ${{ matrix.target }}
       BUILD_PLATFORM: ${{ matrix.platform }}
       BUNDLE_FORMAT: ${{ matrix.bundle }}
@@ -60,20 +136,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
-      - name: Require a matching alpha tag and release notes
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: runner.os == 'macOS'
+        with:
+          name: desktop-backend-${{ matrix.platform }}
+          path: work/desktop-backend
+      - name: Prepare modified Desktop resources
+        if: runner.os == 'macOS'
         run: |
-          node --input-type=module <<'JS'
-          import { readFileSync, accessSync } from 'node:fs';
-          const tag = process.env.RELEASE_TAG;
-          if (!/^v\d+\.\d+\.\d+-alpha\.\d+$/.test(tag)) throw new Error('Select an alpha release tag');
-          const version = tag.slice(1);
-          for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
-            if (JSON.parse(readFileSync(file)).version !== version) throw new Error(`Version mismatch: ${file}`);
-          }
-          const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8');
-          if (cargo.match(/^version = "([^"]+)"/m)?.[1] !== version) throw new Error('Cargo version mismatch');
-          accessSync(`docs/releases/${tag}.md`);
-          JS
+          mkdir -p work/desktop-runtime
+          tar -xzf "work/desktop-backend/desktop-backend-$BUILD_PLATFORM.tar.gz" -C work/desktop-runtime
+          node scripts/prepare-desktop-bundle.mjs prepare --runtime work/desktop-runtime --config work/desktop-bundle.json --target "$BUILD_TARGET"
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -84,13 +157,17 @@ jobs:
       - name: Build installer
         env:
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
-        run: npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" -- --locked
-      - name: Verify Mac image and ad-hoc signature
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" --config work/desktop-bundle.json -- --locked
+          else
+            npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" -- --locked
+          fi
+      - name: Verify Mac runtime, image and ad-hoc signature
         if: runner.os == 'macOS'
         run: |
+          node scripts/prepare-desktop-bundle.mjs verify --runtime work/desktop-runtime --app "src-tauri/target/$BUILD_TARGET/release/bundle/macos/Codex AutoResume.app" --target "$BUILD_TARGET"
           hdiutil verify src-tauri/target/"$BUILD_TARGET"/release/bundle/dmg/*.dmg
-          codesign --verify --deep --strict "src-tauri/target/$BUILD_TARGET/release/bundle/macos/Codex AutoResume.app"
-          file "src-tauri/target/$BUILD_TARGET/release/bundle/macos/Codex AutoResume.app/Contents/MacOS/codex-autoresume"
       - name: Smoke test Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -122,7 +199,8 @@ jobs:
 
   publish:
     name: Publish verified prerelease
-    needs: package
+    if: github.ref_type == 'tag' || inputs.publish == true
+    needs: [metadata, package]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -130,7 +208,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -148,12 +226,31 @@ jobs:
           test -s "Codex-AutoResume-${RELEASE_TAG}-windows-x64.exe"
           sha256sum *.dmg *.exe > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
+      - name: Refuse an existing release or a tag for another commit
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          const { GH_REPO: repo, RELEASE_TAG: tag, GITHUB_SHA: sha } = process.env;
+          function get(endpoint) {
+            try { return JSON.parse(execFileSync('gh', ['api', endpoint], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+            catch (error) {
+              let response;
+              try { response = JSON.parse(error.stdout); } catch { throw error; }
+              if (String(response.status) === '404') return null;
+              throw error;
+            }
+          }
+          if (get(`repos/${repo}/releases/tags/${tag}`)) throw new Error('This release already exists; it will not be overwritten');
+          if (get(`repos/${repo}/git/ref/tags/${tag}`) && get(`repos/${repo}/commits/${tag}`)?.sha !== sha) throw new Error('The existing tag points to another commit');
+          JS
       - name: Publish only after all installers pass
         shell: bash
         run: |
           gh release create "$RELEASE_TAG" work/release-assets/* \
-            --verify-tag --draft --prerelease \
+            --target "$GITHUB_SHA" --draft --prerelease \
             --title "Codex AutoResume ${RELEASE_TAG} · Alpha" \
             --notes-file "docs/releases/${RELEASE_TAG}.md"
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
           test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
