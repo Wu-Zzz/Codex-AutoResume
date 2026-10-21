@@ -4,6 +4,34 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## Second normal-icon startup and native initialization audit — 2026-10-21
+
+- A read-only snapshot after the user's restart confirmed one current installed
+  bridge, three original chats and no execution opt-ins. The official tool helper
+  worked in that original chat. The first remaining compatibility block was now
+  identifiable: `remoteControl/status/read`. Connection success did not establish
+  that continuation could be enabled.
+- The installed Desktop webview was audited alongside the pinned App Server,
+  not just the main-process bundle. Its remote status, memory status, Bedrock
+  discovery and timeline reads have bounded known parameter shapes. Gateway
+  authentication reads can refresh in-memory credentials, so they revoke consent;
+  account notifications revoke globally, and attachment/queue changes revoke the
+  affected chat. Unknown methods and parameter shapes still fail closed.
+- The revised upstream backend completed all 8 isolated Rust tests locally and
+  all 17 sandbox forwarding checks. The same source and patches passed the
+  [backend CI run](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39537257644).
+  These use mock model responses, not a real account quota interruption.
+- Restart interrupted final publication of the local build output after testing.
+  The complete compiled binary was recovered and hash-checked. Future builds
+  copy to a temporary file and rename only after completion, preserving a usable
+  previous output if interrupted. The installed app had already received the
+  complete binary before that publication step.
+- This compatibility correction passed 186 application unit tests and 6
+  wrapper/fake-backend process tests, formatting and Clippy. Frontend type
+  checking, production build and 15 tests also passed. The new cases preserve a
+  pending quota candidate across audited reads and refuse a late quota result
+  after unknown parameters, authentication changes or relevant chat changes.
+
 ## First normal-icon startup and compatibility fixes — 2026-10-21
 
 - After the user reopened Codex from its usual icon, the original Desktop

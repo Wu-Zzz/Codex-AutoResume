@@ -176,7 +176,16 @@ async function main() {
     const executableName = process.platform === 'win32' ? 'codex-app-server.exe' : 'codex-app-server';
     const output = join(work, 'bin');
     await mkdir(output, { recursive: true });
-    await copyFile(join(work, 'target/debug', executableName), join(output, executableName));
+    // A Desktop restart can terminate this build while copying a large binary.
+    // Publish only a complete copy; never truncate the previously usable output.
+    const staging = await mkdtemp(join(output, '.publish-'));
+    try {
+      const stagedExecutable = join(staging, executableName);
+      await copyFile(join(work, 'target/debug', executableName), stagedExecutable);
+      await rename(stagedExecutable, join(output, executableName));
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
     await copyFile(join(integration, 'LICENSE'), join(output, 'LICENSE'));
     await copyFile(join(integration, 'NOTICE'), join(output, 'NOTICE'));
     console.log(`Built modified, unofficial runtime: ${join(output, executableName)}\nNo server was started; no Desktop setting was changed.`);

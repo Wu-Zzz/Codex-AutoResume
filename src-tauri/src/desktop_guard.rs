@@ -124,6 +124,16 @@ impl DesktopGuard {
         }
         let thread = message.pointer("/params/threadId").and_then(Value::as_str);
         match method {
+            "remoteControl/status/read" if message.get("params").is_none_or(Value::is_null) => {
+                // Official 0.163 reads the current remote connection status.
+                // It takes no parameters; new parameter shapes remain unverified.
+            }
+            "account/gatewayOAuth/read" if message.get("params").is_none_or(Value::is_null) => {
+                // This known authentication check may reload keychain credentials
+                // into memory. Keep protocol compatibility, but require new consent.
+                self.telemetry = None;
+                self.revoke_all("账号认证已重新核对，自动续跑已关闭", now);
+            }
             "turn/start"
             | "turn/steer"
             | "turn/interrupt"
@@ -213,6 +223,7 @@ impl DesktopGuard {
                 }
             }
             _ if known_native_maintenance(message) => {}
+            _ if known_webview_read(message) => {}
             _ if known_native_read(method) => {}
             _ => self.incompatible(
                 &format!(
@@ -305,7 +316,10 @@ impl DesktopGuard {
                         }
                     }
                 }
-                "account/updated" | "config/updated" | "remoteControl/status/changed" => {
+                "account/updated"
+                | "account/gatewayOAuth/changed"
+                | "config/updated"
+                | "remoteControl/status/changed" => {
                     self.telemetry = None;
                     self.revoke_all("账号或执行连接已变化，自动续跑已关闭", now);
                 }
@@ -313,6 +327,7 @@ impl DesktopGuard {
                     self.revoke_all("项目设置已变化，请重新开启自动续跑", now);
                 }
                 "thread/settings/updated"
+                | "thread/attachment/updated"
                 | "thread/project/updated"
                 | "thread/goal/updated"
                 | "thread/goal/cleared"
@@ -322,6 +337,7 @@ impl DesktopGuard {
                 | "thread/environment/connected"
                 | "thread/environment/disconnected"
                 | "thread/queue/updated"
+                | "thread/queue/changed"
                 | "model/rerouted" => {
                     if let Some(id) = thread {
                         self.revoke_thread(id, "会话执行上下文已变化，自动续跑已关闭", now);
@@ -1117,6 +1133,36 @@ fn known_native_maintenance(message: &Value) -> bool {
         && message.get("params").is_none_or(Value::is_null)
 }
 
+/// Audited Desktop webview reads. Parameter schemas stay explicit so future
+/// options cannot silently inherit the authorization of today's read operation.
+fn known_webview_read(message: &Value) -> bool {
+    let Some(params) = message.get("params").and_then(Value::as_object) else {
+        return false;
+    };
+    let nullable_u32 = |value: &Value| {
+        value.is_null()
+            || value
+                .as_u64()
+                .is_some_and(|value| u32::try_from(value).is_ok())
+    };
+    match message.get("method").and_then(Value::as_str) {
+        Some("memory/status") => params
+            .iter()
+            .all(|(key, value)| key == "minConsolidatedThreads" && nullable_u32(value)),
+        Some("account/bedrock/discover") => params.is_empty(),
+        Some("thread/timeline/list") => {
+            params.get("threadId").is_some_and(Value::is_string)
+                && params.iter().all(|(key, value)| match key.as_str() {
+                    "threadId" => value.is_string(),
+                    "cursor" => value.is_null() || value.is_string(),
+                    "limit" => nullable_u32(value),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Never include request parameters or arbitrary method text in persisted events.
 fn diagnostic_method(method: &str) -> &str {
     if method.len() <= 64
@@ -1586,6 +1632,238 @@ mod tests {
         let continued = one(guard.tick(104), "turn/continueIfFailed");
         assert_eq!(continued.params["expectedPreviousTurnId"], "failed");
         assert!(guard.tick(104).is_empty());
+    }
+
+    #[test]
+    fn remote_control_status_read_preserves_consent_and_pending_quota_candidate() {
+        for request in [
+            json!({"id":8,"method":"remoteControl/status/read"}),
+            json!({"id":8,"method":"remoteControl/status/read","params":null}),
+        ] {
+            let (_dir, mut guard) = setup();
+            enable_failure(&mut guard);
+            let pending = ready_quota_request(&mut guard, 102);
+            guard.native_client(&request, 103);
+            guard.native_server(
+                &json!({"id":8,"result":{
+                    "status":"disabled","serverName":"synthetic",
+                    "installationId":"synthetic","environmentId":null
+                }}),
+                Some(&request),
+                103,
+            );
+            assert!(guard.snapshot()[0].enabled);
+            assert!(guard.snapshot()[0].can_enable);
+            assert_eq!(guard.threads["thread"].candidate.as_deref(), Some("failed"));
+            guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+            let continued = one(guard.tick(104), "turn/continueIfFailed");
+            assert_eq!(continued.params["expectedPreviousTurnId"], "failed");
+            assert!(guard.tick(104).is_empty());
+        }
+    }
+
+    #[test]
+    fn remote_control_mutations_changes_and_unverified_read_params_revoke() {
+        for message in [
+            json!({"id":8,"method":"remoteControl/enable","params":null}),
+            json!({"id":8,"method":"remoteControl/disable","params":null}),
+            json!({"id":8,"method":"remoteControl/status/read","params":{}}),
+            json!({"id":8,"method":"remoteControl/status/read","params":{"newOption":true}}),
+            json!({"method":"remoteControl/status/changed","params":{
+                "status":"connected","serverName":"synthetic",
+                "installationId":"synthetic","environmentId":"synthetic"
+            }}),
+        ] {
+            let (_dir, mut guard) = setup();
+            enable_failure(&mut guard);
+            let pending = ready_quota_request(&mut guard, 102);
+            if message["method"] == "remoteControl/status/changed" {
+                guard.native_server(&message, None, 103);
+            } else {
+                guard.native_client(&message, 103);
+            }
+            assert!(!guard.snapshot()[0].enabled, "{message}");
+            assert!(guard.threads["thread"].candidate.is_none(), "{message}");
+            guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+            assert!(guard.tick(104).is_empty(), "{message}");
+            assert!(guard
+                .store
+                .get_intent("thread", "failed")
+                .unwrap()
+                .is_none());
+            if message["method"] == "remoteControl/status/read" {
+                assert!(!guard.snapshot()[0].can_enable);
+                assert!(guard.set_enabled("thread", true, 104).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn audited_webview_reads_preserve_a_pending_quota_continuation() {
+        for (method, params) in [
+            ("memory/status", json!({})),
+            ("memory/status", json!({"minConsolidatedThreads":null})),
+            ("memory/status", json!({"minConsolidatedThreads":u32::MAX})),
+            ("account/bedrock/discover", json!({})),
+            ("thread/timeline/list", json!({"threadId":"thread"})),
+            (
+                "thread/timeline/list",
+                json!({"threadId":"thread","cursor":null,"limit":null}),
+            ),
+            (
+                "thread/timeline/list",
+                json!({"threadId":"thread","cursor":"next","limit":u32::MAX}),
+            ),
+        ] {
+            let (_dir, mut guard) = setup();
+            enable_failure(&mut guard);
+            let pending = ready_quota_request(&mut guard, 102);
+            guard.native_client(&json!({"id":8,"method":method,"params":params}), 103);
+            assert!(guard.snapshot()[0].enabled, "{method}");
+            assert!(guard.snapshot()[0].can_enable, "{method}");
+            assert_eq!(guard.threads["thread"].candidate.as_deref(), Some("failed"));
+            guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+            assert_eq!(
+                one(guard.tick(104), "turn/continueIfFailed").params["expectedPreviousTurnId"],
+                "failed"
+            );
+        }
+    }
+
+    #[test]
+    fn unverified_webview_read_parameters_reject_and_discard_late_quota() {
+        for (method, params) in [
+            ("memory/status", None),
+            ("memory/status", Some(json!(null))),
+            ("memory/status", Some(json!({"unexpected":true}))),
+            ("memory/status", Some(json!({"minConsolidatedThreads":-1}))),
+            ("memory/status", Some(json!({"minConsolidatedThreads":1.5}))),
+            (
+                "memory/status",
+                Some(json!({"minConsolidatedThreads":u64::from(u32::MAX)+1})),
+            ),
+            ("account/bedrock/discover", None),
+            ("account/bedrock/discover", Some(json!(null))),
+            (
+                "account/bedrock/discover",
+                Some(json!({"profile":"unverified"})),
+            ),
+            ("thread/timeline/list", None),
+            ("thread/timeline/list", Some(json!({}))),
+            ("thread/timeline/list", Some(json!({"threadId":1}))),
+            (
+                "thread/timeline/list",
+                Some(json!({"threadId":"thread","cursor":false})),
+            ),
+            (
+                "thread/timeline/list",
+                Some(json!({"threadId":"thread","limit":"1"})),
+            ),
+            (
+                "thread/timeline/list",
+                Some(json!({"threadId":"thread","limit":u64::from(u32::MAX)+1})),
+            ),
+            (
+                "thread/timeline/list",
+                Some(json!({"threadId":"thread","future":true})),
+            ),
+            ("account/gatewayOAuth/read", Some(json!({}))),
+            ("account/gatewayOAuth/read", Some(json!({"future":true}))),
+        ] {
+            let (_dir, mut guard) = setup();
+            enable_failure(&mut guard);
+            let pending = ready_quota_request(&mut guard, 102);
+            let mut request = json!({"id":8,"method":method});
+            if let Some(params) = params {
+                request["params"] = params;
+            }
+            guard.native_client(&request, 103);
+            assert!(!guard.snapshot()[0].enabled, "{request}");
+            assert!(!guard.snapshot()[0].can_enable, "{request}");
+            assert!(guard.threads["thread"].candidate.is_none());
+            guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+            assert!(guard.tick(104).is_empty(), "{request}");
+            assert!(guard
+                .store
+                .get_intent("thread", "failed")
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn gateway_auth_checks_and_changes_revoke_all_without_losing_compatibility() {
+        for message in [
+            json!({"id":8,"method":"account/gatewayOAuth/read"}),
+            json!({"id":8,"method":"account/gatewayOAuth/read","params":null}),
+            json!({"method":"account/gatewayOAuth/changed","params":{}}),
+        ] {
+            let (_dir, mut guard) = setup();
+            loaded(&mut guard, "other");
+            enable_failure(&mut guard);
+            guard.set_enabled("other", true, 101).unwrap();
+            let pending = ready_quota_request(&mut guard, 102);
+            if message["method"] == "account/gatewayOAuth/changed" {
+                guard.native_server(&message, None, 103);
+            } else {
+                guard.native_client(&message, 103);
+            }
+            assert!(guard
+                .snapshot()
+                .iter()
+                .all(|task| !task.enabled && task.can_enable));
+            assert!(guard.threads["thread"].candidate.is_none());
+            guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+            assert!(guard.tick(104).is_empty());
+            assert!(guard
+                .store
+                .get_intent("thread", "failed")
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn attachment_and_queue_notifications_revoke_only_the_identified_candidate() {
+        for method in ["thread/attachment/updated", "thread/queue/changed"] {
+            for thread in [Some("thread"), Some("other"), None] {
+                let (_dir, mut guard) = setup();
+                loaded(&mut guard, "other");
+                enable_failure(&mut guard);
+                guard.set_enabled("other", true, 101).unwrap();
+                let pending = ready_quota_request(&mut guard, 102);
+                guard.native_server(
+                    &json!({"method":method,"params":{"threadId":thread}}),
+                    None,
+                    103,
+                );
+                assert_eq!(
+                    guard.threads["thread"].task.enabled,
+                    thread == Some("other")
+                );
+                assert_eq!(
+                    guard.threads["other"].task.enabled,
+                    thread == Some("thread")
+                );
+                assert!(guard.snapshot().iter().all(|task| task.can_enable));
+                guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+                if thread == Some("other") {
+                    assert_eq!(
+                        one(guard.tick(104), "turn/continueIfFailed").params
+                            ["expectedPreviousTurnId"],
+                        "failed"
+                    );
+                } else {
+                    assert!(guard.threads["thread"].candidate.is_none());
+                    assert!(guard.tick(104).is_empty());
+                    assert!(guard
+                        .store
+                        .get_intent("thread", "failed")
+                        .unwrap()
+                        .is_none());
+                }
+            }
+        }
     }
 
     #[test]
