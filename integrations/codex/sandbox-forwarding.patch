@@ -1,0 +1,82 @@
+diff --git a/codex-rs/app-server/src/main.rs b/codex-rs/app-server/src/main.rs
+--- a/codex-rs/app-server/src/main.rs
++++ b/codex-rs/app-server/src/main.rs
+@@ -1,5 +1,7 @@
+ // Modified by Codex AutoResume on 2026-10-20: conditional continuation extension.
+ #![recursion_limit = "256"]
++
++mod autoresume_sandbox;
+ 
+ use clap::Parser;
+ use codex_app_server::AppServerCodeModeHostArgs;
+@@ -88,6 +90,7 @@
+ fn main() -> anyhow::Result<()> {
+     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
++        autoresume_sandbox::forward_if_sandbox()?;
+         let AppServerArgs {
+             config_overrides,
+             code_mode_host,
+diff --git a/codex-rs/app-server/src/autoresume_sandbox.rs b/codex-rs/app-server/src/autoresume_sandbox.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/app-server/src/autoresume_sandbox.rs
+@@ -0,0 +1,58 @@
++// Modified by Codex AutoResume on 2026-10-21: preserve the official sandbox helper.
++use std::ffi::OsStr;
++use std::io;
++
++/// The standalone server advertises itself as the MCP sandbox launcher. Forward
++/// only that subcommand to the verified official CLI; normal App Server and
++/// arg0 helper dispatch continue to use this modified executable.
++pub(crate) fn forward_if_sandbox() -> io::Result<()> {
++    let args: Vec<_> = std::env::args_os().skip(1).collect();
++    if args.first().map(|arg| arg.as_os_str()) != Some(OsStr::new("sandbox")) {
++        return Ok(());
++    }
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::MetadataExt;
++        use std::os::unix::fs::PermissionsExt;
++        use std::os::unix::process::CommandExt;
++        use std::path::PathBuf;
++        use std::process::Command;
++
++        let official = std::env::var_os("AUTORESUME_OFFICIAL_CLI")
++            .map(PathBuf::from)
++            .ok_or_else(|| {
++                io::Error::other("AutoResume sandbox: official CLI is not configured")
++            })?;
++        if !official.is_absolute() {
++            return Err(io::Error::other(
++                "AutoResume sandbox: official CLI path must be absolute",
++            ));
++        }
++        let official = official
++            .canonicalize()
++            .map_err(|_| io::Error::other("AutoResume sandbox: official CLI is unavailable"))?;
++        let metadata = official.metadata()?;
++        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
++            return Err(io::Error::other(
++                "AutoResume sandbox: official CLI must be an executable file",
++            ));
++        }
++        let current = std::env::current_exe()?.metadata()?;
++        if metadata.dev() == current.dev() && metadata.ino() == current.ino() {
++            return Err(io::Error::other(
++                "AutoResume sandbox: refusing recursive CLI forwarding",
++            ));
++        }
++
++        // No shell, argument rewriting, config override, second App Server, or
++        // fallback after execution. exec preserves stdio, cwd, exit and signals.
++        Err(Command::new(official).args(args).exec())
++    }
++
++    #[cfg(not(unix))]
++    Err(io::Error::new(
++        io::ErrorKind::Unsupported,
++        "AutoResume sandbox forwarding is not validated on this platform",
++    ))
++}

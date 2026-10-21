@@ -17,13 +17,21 @@ node scripts/build-guarded-codex.mjs --prepare-only
 # 编译修改版独立 App Server
 node scripts/build-guarded-codex.mjs
 
-# 编译并运行失败状态、启动参数、mock 续跑、Core 竞态四组测试
+# 编译并运行 sandbox 转发、失败状态、启动参数、mock 续跑、Core 竞态五组测试
 node scripts/build-guarded-codex.mjs --test
 ```
 
 脚本使用 [upstream.json](upstream.json) 固定官方 tag、下载地址和 SHA256。每次从校验后的压缩包解压干净源码，再应用补丁。源码、缓存、构建产物都放在忽略的 `work/guarded-codex-build/`。构建禁用调试信息和增量缓存，最多使用 2 个并发任务。`--test` 使用本地 mock，不登录真实账号，不刻意消耗真实额度。
 
 成功后产物位于 `work/guarded-codex-build/bin/codex-app-server`，Windows 文件名带 `.exe`。构建完成不代表已经接入 Desktop。
+
+### 官方 sandbox 辅助入口
+
+MCP 会通过当前执行端的 `sandbox` 子命令探测及启动官方沙盒。[sandbox-forwarding.patch](sandbox-forwarding.patch) 在原有 arg0 辅助入口分发之后，仅将首参数恰为 `sandbox` 的调用转给 `AUTORESUME_OFFICIAL_CLI` 指定的官方 CLI。该路径由桥接层的已验证配置注入；不使用通用的 `CODEX_CLI_PATH` 推断。普通 App Server、apply_patch 和文件系统辅助入口仍由修改版执行端处理。
+
+Unix 转发使用 `exec`，保留原始参数、环境、工作目录和标准输入输出；官方进程失败后不会重试或启动第二个 App Server。路径缺失、相对路径、不可执行文件或指向自身（含硬链接）时拒绝执行。Windows 的这条转发路径明确拒绝，不能据此声称已支持 Desktop 激活。
+
+`--test` 会先用临时 mock CLI 实际验证参数、退出码/信号、输入输出、环境与递归保护，也可在准备源码后单独运行 `node scripts/test-guarded-sandbox.mjs <准备目录>/codex-rs`。该小测试不编译完整上游、不启动真实 Codex。此补丁不解决语音资源包布局与构建身份兼容，也不伪造官方构建标识。
 
 ### 锁文件修复
 
@@ -63,6 +71,6 @@ node scripts/build-guarded-codex.mjs --test
 
 ## 来源、修改与许可
 
-来源：[OpenAI Codex rust-v0.163.0](https://github.com/openai/codex/tree/rust-v0.163.0)。2026-10-20 的修改集中在协议类型与路由、实时失败证据、条件提交、Desktop 启动参数兼容，以及对应测试；没有修改官方已安装应用。
+来源：[OpenAI Codex rust-v0.163.0](https://github.com/openai/codex/tree/rust-v0.163.0)。2026-10-20 至 2026-10-21 的修改集中在协议类型与路由、实时失败证据、条件提交、Desktop 启动参数及 sandbox 辅助入口兼容，以及对应测试；没有修改官方已安装应用。
 
 补丁及其派生运行时遵循随附 [Apache License 2.0](LICENSE)，保留上游 [NOTICE](NOTICE)。AutoResume 主项目的 MIT 许可不替代上游及其依赖的许可。若分发编译产物，需同时保留许可、通知与修改说明，并清楚标明是修改版。

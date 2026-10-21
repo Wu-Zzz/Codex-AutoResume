@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str = "原聊天尚未接入。请在连接设置中启用正常启动接入，再从平时的图标重开 Codex。接入后，每个聊天仍需单独开启续跑。桌面连接目前为实验功能。";
+pub const COMPATIBILITY: &str = "尚未连接 Codex 原聊天。请在连接设置中开启「自动连接 Codex」，然后退出并重新打开 Codex。此功能仍在测试。";
 const TAKEOVER_BLOCKED: &str = "此条目来自历史列表，仅监测；原聊天续跑需使用桌面连接";
 
 pub fn now() -> i64 {
@@ -160,7 +160,7 @@ impl AppState {
         snapshot.desktop_connected = desktop.connected;
         if desktop.connected {
             snapshot.connection = "ready".into();
-            snapshot.connection_message = "已连接原 Codex 聊天 · 实验连接".into();
+            snapshot.connection_message = "已连接 Codex 原聊天。".into();
             snapshot.codex_version = None;
             snapshot.account_label = None;
             snapshot.quota = desktop.quota;
@@ -170,7 +170,7 @@ impl AppState {
                 .retain(|task| !desktop.tasks.iter().any(|native| native.id == task.id));
             snapshot.tasks.extend(desktop.tasks);
             snapshot.compatibility_message = Some(
-                "已接入原 Codex 聊天。在 Codex 中打开聊天后，可单独开启续跑；只处理接入后确认的额度中断。桌面连接目前为实验功能。".into(),
+                "已连接 Codex 原聊天。请在任务列表中开启自动续跑；只处理连接后发生的额度中断。此功能仍在测试。".into(),
             );
         }
         Ok(snapshot)

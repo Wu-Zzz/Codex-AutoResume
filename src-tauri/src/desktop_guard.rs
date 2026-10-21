@@ -6,8 +6,8 @@
 use crate::{
     quota,
     scheduler::{
-        self, Decision, Ownership, SafetyGate, TaskRecord, TaskState, TaskView, TurnObservation,
-        TurnStatus,
+        self, Decision, Ownership, SafetyGate, TaskEvent, TaskRecord, TaskState, TaskView,
+        TurnObservation, TurnStatus,
     },
     store::{ClaimResult, Store},
 };
@@ -66,6 +66,7 @@ pub struct DesktopGuard {
     threads: BTreeMap<String, DesktopThread>,
     ready: bool,
     compatible: bool,
+    incompatibility: Option<TaskEvent>,
     storage_ok: bool,
     paused: bool,
     capability: Capability,
@@ -88,6 +89,7 @@ impl DesktopGuard {
             threads: BTreeMap::new(),
             ready: false,
             compatible: true,
+            incompatibility: None,
             storage_ok: true,
             paused,
             capability: Capability::Unchecked,
@@ -136,6 +138,11 @@ impl DesktopGuard {
             | "thread/queue/add"
             | "thread/queue/update"
             | "thread/queue/remove"
+            | "thread/queue/delete"
+            | "thread/queue/reorder"
+            | "thread/queue/start"
+            | "turn/settings/update"
+            | "thread/realtime/stop"
             | "thread/delete"
             | "thread/metadata/update"
             | "thread/inject_items"
@@ -147,6 +154,27 @@ impl DesktopGuard {
                 } else {
                     self.revoke_all("无法定位用户操作，自动续跑已关闭", now);
                 }
+            }
+            "thread/attachment/add" | "thread/attachment/remove" | "thread/section/move" => {
+                if let Some(id) = thread {
+                    self.revoke_thread(id, "会话关联已变化，请重新开启自动续跑", now);
+                } else {
+                    self.revoke_all("无法定位会话关联变更，自动续跑已关闭", now);
+                }
+            }
+            "project/create"
+            | "project/import"
+            | "project/update"
+            | "project/move"
+            | "project/delete"
+            | "threadSection/create"
+            | "threadSection/update"
+            | "threadSection/delete" => {
+                // Official 0.163 projects.rs/thread_sections.rs mutate project
+                // roots, membership or sidebar metadata. We do not maintain a
+                // complete project/section membership map, so revoke all loaded
+                // consents without declaring the known protocol incompatible.
+                self.revoke_all("项目或侧栏设置已变化，请重新开启自动续跑", now);
             }
             "account/login/start"
             | "account/login/cancel"
@@ -184,8 +212,15 @@ impl DesktopGuard {
                     self.revoke_thread(id, "会话运行上下文已变化，请重新开启自动续跑", now);
                 }
             }
+            _ if known_native_maintenance(message) => {}
             _ if known_native_read(method) => {}
-            _ => self.incompatible("Desktop 使用了未验证的协议操作，自动续跑已关闭", now),
+            _ => self.incompatible(
+                &format!(
+                    "Desktop 使用了未验证的协议操作（{}），自动续跑已关闭",
+                    diagnostic_method(method)
+                ),
+                now,
+            ),
         }
     }
 
@@ -274,7 +309,11 @@ impl DesktopGuard {
                     self.telemetry = None;
                     self.revoke_all("账号或执行连接已变化，自动续跑已关闭", now);
                 }
+                "project/changed" => {
+                    self.revoke_all("项目设置已变化，请重新开启自动续跑", now);
+                }
                 "thread/settings/updated"
+                | "thread/project/updated"
                 | "thread/goal/updated"
                 | "thread/goal/cleared"
                 | "thread/closed"
@@ -302,7 +341,13 @@ impl DesktopGuard {
                     }
                 }
                 _ if known_notification(method) => {}
-                _ => self.incompatible("Codex 返回了未验证的事件，自动续跑已关闭", now),
+                _ => self.incompatible(
+                    &format!(
+                        "Codex 返回了未验证的事件（{}），自动续跑已关闭",
+                        diagnostic_method(method)
+                    ),
+                    now,
+                ),
             }
             return;
         }
@@ -395,6 +440,15 @@ impl DesktopGuard {
                     && self.storage_ok
                     && self.capability == Capability::Supported
                     && !state.awaiting_user;
+                if let Some(reason) = &self.incompatibility {
+                    // Later config notifications can replace the observation,
+                    // but cannot remove this live generation's permanent block.
+                    view.state = TaskState::NeedsAttention;
+                    view.detail = "当前 Codex 版本暂不支持自动续跑，请等待兼容更新".into();
+                    if !view.events.contains(reason) {
+                        view.events.insert(0, reason.clone());
+                    }
+                }
                 view
             })
             .collect()
@@ -955,6 +1009,10 @@ impl DesktopGuard {
 
     fn incompatible(&mut self, reason: &str, now: i64) {
         self.compatible = false;
+        self.incompatibility.get_or_insert_with(|| TaskEvent {
+            at: now,
+            message: reason.into(),
+        });
         self.revoke_all(reason, now);
     }
 
@@ -1048,10 +1106,39 @@ fn parse_turn(value: &Value) -> Option<TurnObservation> {
     })
 }
 
+/// The original Desktop requests this maintenance during startup. In official
+/// 0.163, request_processors/rollout.rs only schedules compression.rs's cold-file
+/// worker. Publication rechecks file identity and takes writer_lock.rs's shared
+/// cross-process coordination lock; an active writer makes it skip publication.
+/// It does not submit a turn or change execution settings. This is maintenance,
+/// not a read operation, and future parameters require a fresh protocol audit.
+fn known_native_maintenance(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("rollout/compress")
+        && message.get("params").is_none_or(Value::is_null)
+}
+
+/// Never include request parameters or arbitrary method text in persisted events.
+fn diagnostic_method(method: &str) -> &str {
+    if method.len() <= 64
+        && (2..=4).contains(&method.split('/').count())
+        && method.split('/').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        })
+    {
+        method
+    } else {
+        "方法名格式未识别"
+    }
+}
+
 fn known_native_read(method: &str) -> bool {
     matches!(
         method,
         "thread/read"
+            | "thread/search"
+            | "thread/searchOccurrences"
+            | "thread/items/read"
             | "thread/list"
             | "thread/loaded/list"
             | "thread/turns/list"
@@ -1059,10 +1146,15 @@ fn known_native_read(method: &str) -> bool {
             | "thread/goal/get"
             | "thread/queue/list"
             | "account/read"
+            | "account/bedrock/checkGovCloudRequirements"
             | "account/rateLimits/read"
             | "model/list"
             | "modelProvider/capabilities/read"
             | "config/read"
+            | "server/diagnostics"
+            | "environment/info"
+            | "environment/status"
+            | "thread/realtime/listVoices"
             | "configRequirements/read"
             | "permissionProfile/list"
             | "collaborationMode/list"
@@ -1464,6 +1556,168 @@ mod tests {
         assert!(!guard.snapshot()[0].enabled);
         assert!(!guard.snapshot()[0].can_enable);
         assert!(guard.tick(102).is_empty());
+    }
+
+    #[test]
+    fn audited_startup_reads_and_compression_preserve_explicit_consent_only() {
+        let (_dir, mut guard) = setup();
+        for request in [
+            json!({"id":8,"method":"rollout/compress"}),
+            json!({"id":9,"method":"account/bedrock/checkGovCloudRequirements","params":{}}),
+            json!({"id":10,"method":"server/diagnostics","params":{}}),
+        ] {
+            guard.native_client(&request, 101);
+            assert!(guard.snapshot()[0].can_enable);
+            assert!(!guard.snapshot()[0].enabled);
+        }
+        enable_failure(&mut guard);
+        let pending = ready_quota_request(&mut guard, 102);
+        guard.native_client(
+            &json!({"id":11,"method":"rollout/compress","params":null}),
+            103,
+        );
+        guard.native_server(
+            &json!({"id":11,"result":{}}),
+            Some(&json!({"method":"rollout/compress"})),
+            103,
+        );
+        assert!(guard.snapshot()[0].enabled);
+        guard.reply(pending.id, &json!({"result":quota(0,None)}), 104);
+        let continued = one(guard.tick(104), "turn/continueIfFailed");
+        assert_eq!(continued.params["expectedPreviousTurnId"], "failed");
+        assert!(guard.tick(104).is_empty());
+    }
+
+    #[test]
+    fn compression_with_unverified_parameters_still_disables_execution() {
+        let (_dir, mut guard) = setup();
+        enable_failure(&mut guard);
+        guard.native_client(
+            &json!({"method":"rollout/compress","params":{"newOption":true}}),
+            102,
+        );
+        assert!(!guard.snapshot()[0].can_enable);
+        assert!(!guard.snapshot()[0].enabled);
+        assert!(guard.tick(102).is_empty());
+        assert!(guard.set_enabled("thread", true, 103).is_err());
+    }
+
+    #[test]
+    fn known_project_and_section_changes_revoke_but_allow_fresh_consent() {
+        for method in [
+            "project/import",
+            "project/update",
+            "project/move",
+            "project/delete",
+            "threadSection/create",
+            "threadSection/update",
+            "threadSection/delete",
+        ] {
+            let (_dir, mut guard) = setup();
+            loaded(&mut guard, "other");
+            enable_failure(&mut guard);
+            guard.set_enabled("other", true, 101).unwrap();
+            guard.native_client(
+                &json!({"method":method,"params":{"projectId":"project","sectionId":"section"}}),
+                102,
+            );
+            assert!(
+                guard.snapshot().iter().all(|t| !t.enabled && t.can_enable),
+                "{method}"
+            );
+            assert!(guard.tick(102).is_empty());
+            guard.set_enabled("thread", true, 103).unwrap();
+            assert!(!guard.threads["other"].task.enabled);
+        }
+        let (_dir, mut guard) = setup();
+        enable_failure(&mut guard);
+        guard.native_server(&json!({"method":"project/changed","params":{"projectId":"project","changeType":"updated"}}), None, 102);
+        assert!(!guard.snapshot()[0].enabled);
+        assert!(guard.snapshot()[0].can_enable);
+    }
+
+    #[test]
+    fn attachment_and_membership_changes_revoke_only_the_affected_chat() {
+        for method in [
+            "thread/attachment/add",
+            "thread/attachment/remove",
+            "thread/section/move",
+            "thread/project/updated",
+        ] {
+            let (_dir, mut guard) = setup();
+            loaded(&mut guard, "other");
+            enable_failure(&mut guard);
+            guard.set_enabled("other", true, 101).unwrap();
+            let message = json!({"method":method,"params":{"threadId":"thread"}});
+            if method == "thread/project/updated" {
+                guard.native_server(&message, None, 102);
+            } else {
+                guard.native_client(&message, 102);
+            }
+            assert!(!guard.threads["thread"].task.enabled, "{method}");
+            assert!(guard.threads["other"].task.enabled, "{method}");
+            assert!(guard.snapshot().iter().all(|t| t.can_enable));
+            assert!(guard.tick(102).is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_protocol_diagnostics_include_only_bounded_method_names() {
+        for method in [
+            "future/operation".to_string(),
+            "private@example.com".into(),
+            "future/op?token=PRIVATE".into(),
+            format!("future/{}", "x".repeat(65)),
+            "/private/path".into(),
+        ] {
+            for from_server in [false, true] {
+                let (_dir, mut guard) = setup();
+                enable_failure(&mut guard);
+                let message =
+                    json!({"method":method,"params":{"privateInput":"DO_NOT_PERSIST_PAYLOAD"}});
+                if from_server {
+                    guard.native_server(&message, None, 102);
+                } else {
+                    guard.native_client(&message, 102);
+                }
+                let snapshot = guard.snapshot();
+                assert!(!snapshot[0].enabled && !snapshot[0].can_enable);
+                let persisted_view = serde_json::to_string(&snapshot).unwrap();
+                assert!(!persisted_view.contains("DO_NOT_PERSIST_PAYLOAD"));
+                if method == "future/operation" {
+                    assert!(persisted_view.contains(&method));
+                } else {
+                    assert!(!persisted_view.contains(&method));
+                    assert!(persisted_view.contains("方法名格式未识别"));
+                }
+                assert!(guard.set_enabled("thread", true, 103).is_err());
+                assert!(guard.tick(103).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_incompatibility_survives_later_config_revocation_and_newly_loaded_chats() {
+        let (_dir, mut guard) = setup();
+        enable_failure(&mut guard);
+        guard.native_client(&json!({"method":"future/operation","params":{}}), 102);
+        let blocked = guard.snapshot()[0].clone();
+        guard.native_server(&json!({"method":"config/updated","params":{}}), None, 103);
+        // A newly opened chat also needs the original cause, even though it was
+        // not loaded when the connection first became incompatible.
+        loaded(&mut guard, "later-chat");
+        for view in guard.snapshot() {
+            assert!(!view.can_enable && !view.enabled);
+            assert_eq!(view.state, TaskState::NeedsAttention);
+            assert_eq!(view.detail, blocked.detail);
+            assert!(view
+                .events
+                .iter()
+                .any(|e| e.message.contains("future/operation")));
+        }
+        assert!(guard.set_enabled("thread", true, 104).is_err());
+        assert!(guard.set_enabled("later-chat", true, 104).is_err());
+        assert!(guard.tick(104).is_empty());
     }
 
     #[test]

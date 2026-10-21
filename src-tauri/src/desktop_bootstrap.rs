@@ -77,7 +77,7 @@ if ! autoresume_matching_build; then
     printf '%s\n' 'Codex AutoResume：当前 Codex 版本尚未验证，已使用官方 Codex。' >&2
     autoresume_official "$@"
 fi
-if ! /usr/bin/env AUTORESUME_BRIDGE_CONFIG={config} {bridge} --autoresume-check-config >/dev/null 2>&1; then
+if ! /usr/bin/env AUTORESUME_BRIDGE_CONFIG={config} AUTORESUME_DESKTOP_ENABLE_FILE={enabled} AUTORESUME_DESKTOP_ENABLE_TOKEN={token} {bridge} --autoresume-check-config >/dev/null 2>&1; then
     printf '%s\n' 'Codex AutoResume：桌面连接配置未通过检查，已使用官方 Codex。' >&2
     autoresume_official "$@"
 fi

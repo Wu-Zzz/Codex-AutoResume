@@ -39,6 +39,53 @@ pub fn classify(args: &[OsString]) -> Invocation {
     Invocation::Official
 }
 
+fn classify_for_installation(args: &[OsString], installed: bool) -> Invocation {
+    let invocation = classify(args);
+    if installed {
+        if let Invocation::Guarded(server_args) = &invocation {
+            if !desktop_main_signature(server_args) {
+                return Invocation::Official;
+            }
+        }
+    }
+    invocation
+}
+
+/// The verified Desktop launcher supplies both code-mode hosting and its
+/// analytics default. Its Node MCP helper also inherits CODEX_CLI_PATH but starts
+/// a generic App Server without these flags; that helper must stay official.
+/// Parse config values as values, so a quoted flag cannot imitate a launcher.
+fn desktop_main_signature(args: &[OsString]) -> bool {
+    let mut code_mode_host = false;
+    let mut analytics_default = false;
+    let mut index = 0;
+    while index < args.len() {
+        let value = args[index].to_str();
+        let config = match value {
+            Some("-c" | "--config") => {
+                index += 1;
+                args.get(index).and_then(|value| value.to_str())
+            }
+            Some("--analytics-default-enabled") => {
+                analytics_default = true;
+                None
+            }
+            Some(value) => value
+                .strip_prefix("--config=")
+                .or_else(|| value.strip_prefix("-c")),
+            None => None,
+        };
+        if let Some((key, value)) = config.and_then(|config| config.split_once('=')) {
+            if key.trim() == "features.code_mode_host" {
+                // A later override must not leave the earlier true marker active.
+                code_mode_host = value.trim() == "true";
+            }
+        }
+        index += 1;
+    }
+    code_mode_host && analytics_default
+}
+
 fn config_assignment(value: &str) -> bool {
     value.starts_with("--config=") || (value.starts_with("-c") && value.len() > 2)
 }
@@ -107,6 +154,40 @@ impl BridgeConfig {
             .canonicalize()
             .map_err(|error| format!("无法确认桌面桥接数据目录：{error}"))?;
         Ok(config)
+    }
+
+    pub(crate) fn check_installed_helper(&self) -> Result<(), String> {
+        // Installation currently supports this verified macOS Desktop package
+        // only. Never discover a replacement helper through PATH or another app.
+        let package = self
+            .official_cli
+            .ancestors()
+            .nth(4)
+            .filter(|package| {
+                package.join("CodexCLI.app/Contents/MacOS/codex") == self.official_cli
+            })
+            .ok_or("官方 Codex 运行组件布局尚未验证")?;
+        let source = package.join("bin/codex-code-mode-host");
+        let source_metadata = fs::symlink_metadata(&source)
+            .map_err(|_| "官方代码执行组件缺失，已拒绝使用实验桌面组件")?;
+        if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+            return Err("官方代码执行组件类型无效".into());
+        }
+        let expected = canonical_executable(&source)?;
+        let linked = self
+            .guarded_app_server
+            .parent()
+            .ok_or("实验桌面运行组件目录无效")?
+            .join("codex-code-mode-host");
+        if !fs::symlink_metadata(&linked)
+            .map_err(|_| "实验桌面代码执行组件链接缺失")?
+            .file_type()
+            .is_symlink()
+            || canonical_executable(&linked)? != expected
+        {
+            return Err("实验桌面代码执行组件未连接到已验证的官方组件".into());
+        }
+        Ok(())
     }
 }
 
@@ -192,14 +273,30 @@ pub fn run_wrapper() -> Result<i32, String> {
         std::env::current_exe().map_err(|error| format!("无法确认桥接程序路径：{error}"))?;
     let config = BridgeConfig::load(Path::new(&config_path), &wrapper)?;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // Presence of either installation marker selects the narrower route even
+    // when the pair is malformed. The bridge separately validates their token;
+    // a partial pair must never silently become the legacy manual mode.
+    let installed = std::env::var_os("AUTORESUME_DESKTOP_ENABLE_FILE").is_some()
+        || std::env::var_os("AUTORESUME_DESKTOP_ENABLE_TOKEN").is_some();
     // The persistent entry point checks configuration before selecting a backend.
     // This branch never starts an App Server or touches a user's chat.
     if args == [OsString::from("--autoresume-check-config")] {
+        if installed {
+            config.check_installed_helper()?;
+        }
         return Ok(0);
     }
-    match classify(&args) {
+    match classify_for_installation(&args, installed) {
         Invocation::Official => pass_through(&config, &args),
-        Invocation::Guarded(args) => run_guarded(config, args),
+        Invocation::Guarded(server_args) => {
+            // Recheck after bootstrap preflight. Losing a helper must not break
+            // normal Desktop use or register an unusable guarded connection.
+            if installed && config.check_installed_helper().is_err() {
+                eprintln!("Codex AutoResume：代码执行组件未通过检查，已使用官方 Codex。");
+                return pass_through(&config, &args);
+            }
+            run_guarded(config, server_args)
+        }
     }
 }
 
@@ -258,6 +355,75 @@ mod tests {
                 "sandbox_mode=\"workspace-write\"",
             ]))
         );
+    }
+
+    #[test]
+    fn installed_route_accepts_both_verified_desktop_config_orders() {
+        for values in [
+            vec![
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "--analytics-default-enabled",
+                "-c",
+                "sandbox_mode=\"workspace-write\"",
+            ],
+            vec![
+                "app-server",
+                "-c",
+                "features.code_mode_host=true",
+                "-c",
+                "chatgpt_base_url=\"https://example.invalid\"",
+                "--analytics-default-enabled",
+            ],
+        ] {
+            let original = args(&values);
+            assert!(matches!(
+                classify_for_installation(&original, true),
+                Invocation::Guarded(_)
+            ));
+            assert_eq!(
+                classify_for_installation(&original, true),
+                classify(&original)
+            );
+        }
+    }
+
+    #[test]
+    fn installed_route_keeps_auxiliary_servers_official_and_manual_mode_unchanged() {
+        for values in [
+            vec!["app-server", "--listen", "stdio://"],
+            vec!["app-server"],
+            vec!["-c", "features.code_mode_host=true", "app-server"],
+            vec!["app-server", "--analytics-default-enabled"],
+            vec![
+                "-c",
+                "--analytics-default-enabled",
+                "app-server",
+                "-c",
+                "features.code_mode_host=true",
+            ],
+            vec![
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "--analytics-default-enabled",
+                "-c",
+                "features.code_mode_host=false",
+            ],
+        ] {
+            let original = args(&values);
+            assert_eq!(
+                classify_for_installation(&original, true),
+                Invocation::Official,
+                "{values:?}"
+            );
+            assert_eq!(
+                classify_for_installation(&original, false),
+                classify(&original)
+            );
+            assert!(matches!(classify(&original), Invocation::Guarded(_)));
+        }
     }
 
     #[test]

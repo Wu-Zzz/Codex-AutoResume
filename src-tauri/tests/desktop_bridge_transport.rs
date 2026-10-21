@@ -19,6 +19,7 @@ use tempfile::TempDir;
 const BACKEND: &str = r#"#!/usr/bin/python3
 import json, os, sys
 
+assert os.environ['AUTORESUME_OFFICIAL_CLI'] == os.environ['AUTORESUME_TEST_EXPECTED_OFFICIAL']
 thread_id = 'original-desktop-chat'
 held_quota = None
 
@@ -118,7 +119,10 @@ impl Fixture {
         let data = directory.path().join("data");
         fs::create_dir(&data).unwrap();
         fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
-        let official = directory.path().join("synthetic-official");
+        let official = directory
+            .path()
+            .join("codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        fs::create_dir_all(official.parent().unwrap()).unwrap();
         let backend = directory.path().join("synthetic-backend");
         // Two distinct executables are required; the official fallback must
         // never run in this test's recognized app-server invocation.
@@ -126,6 +130,17 @@ impl Fixture {
         fs::write(&backend, BACKEND).unwrap();
         for path in [&official, &backend] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if enable_token.is_some() {
+            let helper = directory.path().join("codex-cli/bin/codex-code-mode-host");
+            fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            fs::write(&helper, "#!/bin/sh\nexit 93\n").unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+            std::os::unix::fs::symlink(
+                helper.canonicalize().unwrap(),
+                directory.path().join("codex-code-mode-host"),
+            )
+            .unwrap();
         }
         let config = directory.path().join("config.json");
         fs::write(
@@ -139,12 +154,26 @@ impl Fixture {
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let log = directory.path().join("backend.jsonl");
         let mut command = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"));
+        if enable_token.is_some() {
+            // Installed bridges recognize the verified main Desktop launcher;
+            // its auxiliary Node App Servers must never enter this adapter.
+            command.args([
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "--analytics-default-enabled",
+            ]);
+        } else {
+            command.args(["app-server", "--listen", "stdio://"]);
+        }
         command
-            .arg("app-server")
-            .arg("--listen")
-            .arg("stdio://")
             .env("AUTORESUME_BRIDGE_CONFIG", &config)
             .env("AUTORESUME_TEST_BACKEND_LOG", &log)
+            .env("AUTORESUME_OFFICIAL_CLI", "/untrusted/inherited/path")
+            .env(
+                "AUTORESUME_TEST_EXPECTED_OFFICIAL",
+                official.canonicalize().unwrap(),
+            )
             .env_remove("AUTORESUME_DESKTOP_ENABLE_FILE")
             .env_remove("AUTORESUME_DESKTOP_ENABLE_TOKEN")
             .env(
@@ -371,6 +400,89 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn installed_auxiliary_app_server_passes_through_official_without_registration() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    let official = directory.path().join("synthetic-official");
+    let backend = directory.path().join("synthetic-guarded");
+    let marker = directory.path().join("unexpected-guarded-start");
+    fs::write(
+        &official,
+        r#"#!/usr/bin/python3
+import json, os, sys
+print(json.dumps({'kind':'official', 'args':sys.argv[1:],
+                  'cli':os.environ['CODEX_CLI_PATH'],
+                  'home':os.environ['CODEX_HOME'], 'cwd':os.getcwd()}), flush=True)
+sys.exit(37)
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &backend,
+        "#!/bin/sh\nprintf started > \"$AUTORESUME_TEST_START_MARKER\"\nexit 91\n",
+    )
+    .unwrap();
+    for path in [&official, &backend] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let config = directory.path().join("bridge.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "officialCli":official,"guardedAppServer":backend,"dataDir":data
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let enabled = directory.path().join("enabled");
+    fs::write(&enabled, "runtime-synthetic").unwrap();
+    fs::set_permissions(&enabled, fs::Permissions::from_mode(0o600)).unwrap();
+    let working_directory = directory.path().join("working directory");
+    fs::create_dir(&working_directory).unwrap();
+    let args = ["app-server", "--listen", "stdio://"];
+    for include_token in [true, false] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"));
+        command
+            .env_clear()
+            .args(args)
+            .current_dir(&working_directory)
+            .env("AUTORESUME_BRIDGE_CONFIG", &config)
+            .env("AUTORESUME_DESKTOP_ENABLE_FILE", &enabled)
+            .env("AUTORESUME_TEST_START_MARKER", &marker)
+            .env("CODEX_CLI_PATH", "must-not-reenter-wrapper")
+            .env("CODEX_HOME", "/synthetic/unchanged-home")
+            .stdin(Stdio::null());
+        if include_token {
+            command.env("AUTORESUME_DESKTOP_ENABLE_TOKEN", "runtime-synthetic");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(37));
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["kind"], "official");
+        assert_eq!(value["args"], json!(args));
+        assert_eq!(
+            value["cli"],
+            official.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(value["home"], "/synthetic/unchanged-home");
+        assert_eq!(
+            value["cwd"],
+            working_directory.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(!marker.exists());
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "auxiliary server must not register a second Desktop connection"
+        );
+    }
+}
+
+#[test]
 fn configuration_preflight_never_launches_backends_or_registers_a_connection() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");
@@ -432,6 +544,107 @@ fn configuration_preflight_never_launches_backends_or_registers_a_connection() {
             "{label}: preflight created runtime state or a connection registration"
         );
     }
+}
+
+#[test]
+fn installed_preflight_requires_current_executable_official_helper_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    let official = directory
+        .path()
+        .join("codex-cli/CodexCLI.app/Contents/MacOS/codex");
+    fs::create_dir_all(official.parent().unwrap()).unwrap();
+    let guarded = directory.path().join("synthetic-guarded");
+    let marker = directory.path().join("unexpected-backend-start");
+    fs::write(
+        &official,
+        "#!/usr/bin/python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(37)\n",
+    )
+    .unwrap();
+    fs::write(
+        &guarded,
+        "#!/bin/sh\nprintf started > \"$AUTORESUME_TEST_START_MARKER\"\nexit 97\n",
+    )
+    .unwrap();
+    for path in [&official, &guarded] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let config = directory.path().join("bridge.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "officialCli":official,"guardedAppServer":guarded,"dataDir":data
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let source = directory.path().join("codex-cli/bin/codex-code-mode-host");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "#!/bin/sh\nexit 98\n").unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    let linked = directory.path().join("codex-code-mode-host");
+    let command = |installed: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"));
+        command
+            .env_clear()
+            .env("AUTORESUME_BRIDGE_CONFIG", &config)
+            .env("AUTORESUME_TEST_START_MARKER", &marker)
+            .stdin(Stdio::null());
+        if installed {
+            // A partial install marker must still require the installed helper.
+            command.env(
+                "AUTORESUME_DESKTOP_ENABLE_FILE",
+                directory.path().join("enabled"),
+            );
+        }
+        command
+    };
+    let preflight = |label: &str, valid: bool| {
+        for installed in [false, true] {
+            let output = command(installed)
+                .arg("--autoresume-check-config")
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), !installed || valid, "{label}");
+            assert!(output.stdout.is_empty(), "{label}: protocol output");
+            assert!(!marker.exists(), "{label}: backend started");
+            assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "{label}");
+        }
+    };
+    preflight("missing runtime link", false);
+    fs::copy(&source, &linked).unwrap();
+    preflight("untracked helper copy", false);
+    fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(&guarded, &linked).unwrap();
+    preflight("different executable target", false);
+    fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(&source, &linked).unwrap();
+    preflight("verified official helper", true);
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+    preflight("helper no longer executable", false);
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_file(&source).unwrap();
+    preflight("official update removed helper", false);
+
+    // If a helper vanishes between bootstrap preflight and the actual launch,
+    // fall back before registering or spawning any guarded backend.
+    let original_args = [
+        "-c",
+        "features.code_mode_host=true",
+        "app-server",
+        "--analytics-default-enabled",
+    ];
+    let output = command(true).args(original_args).output().unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!(original_args)
+    );
+    assert!(!marker.exists());
+    assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
 }
 
 #[test]

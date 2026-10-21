@@ -143,7 +143,7 @@ async function main() {
     }
     await verify(lockfilePath, manifest.lockfile.afterSha256);
     verifyLockRepair(beforeLock, await readFile(lockfilePath, 'utf8'), manifest);
-    console.log(`Verified ${manifest.tag}, applied the conditional-continuation patch and local-version-only lock repair.\nPrepared source: ${source}`);
+    console.log(`Verified ${manifest.tag}, applied ${manifest.patches.length} pinned integration patches.\nPrepared source: ${source}`);
     if (flags.has('--prepare-only')) return;
 
     const workspace = join(source, 'codex-rs');
@@ -152,6 +152,9 @@ async function main() {
       throw new Error(`Required Rust ${manifest.rustToolchain}; found ${compiler}`);
     }
     await run('cargo', ['--version'], { cwd: workspace });
+    if (flags.has('--test')) {
+      await run(process.execPath, [join(root, 'scripts/test-guarded-sandbox.mjs'), workspace], { cwd: workspace });
+    }
     const env = {
       ...process.env,
       CARGO_TARGET_DIR: join(work, 'target'),

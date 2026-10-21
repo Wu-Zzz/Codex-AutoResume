@@ -6,6 +6,7 @@
   "rustToolchain": "1.95.0",
   "patches": [
     "conditional-continuation.patch",
+    "sandbox-forwarding.patch",
     "release-lock-versions.patch"
   ],
   "lockfile": {

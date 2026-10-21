@@ -4,6 +4,53 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## First normal-icon startup and compatibility fixes — 2026-10-21
+
+- After the user reopened Codex from its usual icon, the original Desktop
+  process did load the private bridge and modified backend. Read-only control
+  snapshots exposed four original chats; all continuation switches remained off.
+  This establishes startup and observation, not automatic continuation.
+- That first launch exposed a missing official `codex-code-mode-host` helper.
+  Placing the unchanged official helper beside the private backend restored tool
+  execution in the current original chat without a second restart. New installs
+  instead create a verified link to that signed official file, and check it again
+  before selecting the backend. A missing or mismatched helper falls back before
+  backend startup; an already-running backend is never replayed.
+- A nested App Server started by the Desktop's Node tool also inherited the
+  override, creating an empty second bridge and hiding quota telemetry. Installed
+  routing now recognizes only the audited main Desktop invocation; the auxiliary
+  invocation passes through to the official CLI. Manual diagnostic routing is
+  unchanged. This change has process-level mock coverage, not a second live
+  Desktop startup yet.
+- The first live generation rejected an unclassified native method. Source audit
+  identified startup `rollout/compress` as a likely trigger: the official cold-file
+  worker checks file identity and coordinates with active writers. This maintenance
+  method is now audited separately from reads; unknown parameters still block
+  execution. Known project changes revoke consent without declaring the whole
+  connection incompatible. Unknown methods still fail closed, with bounded
+  method-name-only diagnostics and a persistent visible reason. The original
+  generic diagnostic did not record the triggering method, so the exact live
+  cause remains unconfirmed until the next startup.
+- The standalone backend also lacked the full CLI's `sandbox` subcommand used by
+  MCP launcher probing. A narrowly scoped patch forwards that subcommand to the
+  validated official CLI and preserves raw arguments, process exit and stdio.
+  It retains the modified backend's existing arg0 helpers; it does not change
+  sandbox policy. The new forwarding module passed 17 isolated process checks.
+- Connection text now uses plain Chinese, distinguishes connection from the
+  ability to enable continuation, avoids repeating restart instructions after
+  connection, and checks the installation again when the user clicks recheck.
+- Revised application checks passed: frontend type checking and 15 tests;
+  178 Rust unit tests and 6 wrapper/fake-backend process tests. The installation
+  status tests remove or replace helpers, damage configuration, change the token
+  and simulate a Desktop upgrade, while preserving the ability to turn it off.
+- Desktop voice remains unsupported by the modified runtime: official voice
+  components require a matching package layout and build identity. No build
+  identity was spoofed. This limitation is shown in connection details.
+- No live continuation prompt, chat opt-in, approval, interruption or account
+  mutation was issued during these checks. Real quota recovery and the revised
+  backend in the original Desktop still need separate acceptance. No new Release
+  has been published.
+
 ## Normal-icon integration — 2026-10-21
 
 - The inspected macOS Desktop build `20770` loads its login/interactive shell

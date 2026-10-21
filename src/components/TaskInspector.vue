@@ -47,7 +47,7 @@ const permissionTone = computed(() => {
       <dl>
         <div><dt>{{ task.mode === 'managed' ? '托管编号' : '会话' }}</dt><dd class="mono selectable">{{ task.id }}</dd></div>
         <div><dt>最近核对</dt><dd class="mono">{{ formatTime(checkedAt, true) }}</dd></div>
-        <div><dt>管理方式</dt><dd>{{ task.mode === 'desktop' ? '原 Codex 聊天 · 实验连接' : task.mode === 'managed' ? '本工具启动 · 终端托管' : '已有会话 · 仅监测' }}</dd></div>
+        <div><dt>任务来源</dt><dd>{{ task.mode === 'desktop' ? 'Codex 原聊天（测试中）' : task.mode === 'managed' ? '本工具创建的终端任务' : '历史记录（仅查看状态）' }}</dd></div>
         <div><dt>自动续跑</dt><dd>{{ task.mode !== 'monitor' ? (task.enabled ? '已授权' : '未开启') : '此条目仅监测' }}</dd></div>
       </dl>
     </details>

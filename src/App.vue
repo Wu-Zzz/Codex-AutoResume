@@ -63,6 +63,19 @@ watch(filteredTasks, tasks => {
 })
 const connected = computed(() => snapshot.value.connection === 'ready')
 const desktopChatsConnected = computed(() => snapshot.value.desktopConnected)
+const desktopConnectionNote = computed(() => {
+  const chats = snapshot.value.tasks.filter(task => task.mode === 'desktop')
+  if (!chats.length) return '在 Codex 中打开聊天，即可在任务列表中看到它。'
+  if (chats.every(task => task.canEnable === false)) return '暂时无法开启自动续跑，请查看任务列表中的提示。'
+  return '请在任务列表中，为需要的聊天开启自动续跑。'
+})
+const desktopSetupNote = computed(() => {
+  if (!desktop) return '请在桌面应用中设置。'
+  if (busy.value.has('get_desktop_setup')) return '正在检查…'
+  if (!desktopSetup.value) return ''
+  if (!desktopSetup.value.available || !desktopSetup.value.installed) return desktopSetup.value.message
+  return desktopChatsConnected.value ? '' : '已开启。请退出并重新打开 Codex。'
+})
 const capabilityLabel = computed(() => {
   if (demo) return '界面预览 · 示例数据'
   if (desktopChatsConnected.value) return '桌面续跑 · 实验'
@@ -111,6 +124,10 @@ async function openConnection() {
   } finally {
     busy.value.delete('get_desktop_setup')
   }
+}
+
+async function recheckConnection() {
+  if (await mutate('reconnect')) await openConnection()
 }
 
 async function toggleDesktopSetup() {
@@ -352,24 +369,24 @@ onBeforeUnmount(() => {
       <div class="footer-actions"><button class="icon-button" aria-label="打开主窗口" title="打开主窗口" @click="openMain()"><img :src="expandIcon" alt=""/></button><button class="icon-button" aria-label="查看连接状态" title="查看连接状态" @click="openConnection"><img :src="settingsIcon" alt=""/></button></div>
     </footer>
     <dialog ref="connectionDialog" class="dialog connection-dialog" aria-labelledby="connection-title" @close="restoreFocus">
-      <div class="dialog-header"><h2 id="connection-title">连接 Codex</h2><button class="icon-button" aria-label="关闭连接状态" autofocus @click="connectionDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
-      <div class="connection-card"><img v-if="connected && !demo" :src="checkIcon" alt=""/><span v-else class="connection-dot" :class="snapshot.connection" aria-hidden="true"/><strong>{{ connectionLabel }}</strong><span v-if="snapshot.codexVersion" class="version-label">{{ snapshot.codexVersion }}</span></div>
-      <div class="connection-message" :class="snapshot.connection"><h3 v-if="snapshot.connection === 'login_required'"><img :src="loginAlert" alt=""/>需要重新登录</h3><p>{{ snapshot.connectionMessage }}</p></div>
+      <div class="dialog-header"><h2 id="connection-title">Codex 连接</h2><button class="icon-button" aria-label="关闭连接状态" autofocus @click="connectionDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
+      <div class="connection-card"><img v-if="connected && !demo" :src="checkIcon" alt=""/><span v-else class="connection-dot" :class="snapshot.connection" aria-hidden="true"/><div><strong>{{ desktopChatsConnected ? '已连接 Codex' : connectionLabel }}</strong><p v-if="desktopChatsConnected">{{ desktopConnectionNote }}</p></div></div>
+      <div v-if="!desktopChatsConnected" class="connection-message" :class="snapshot.connection"><h3 v-if="snapshot.connection === 'login_required'"><img :src="loginAlert" alt=""/>需要重新登录</h3><p>{{ snapshot.connectionMessage }}</p></div>
       <section class="desktop-setup" aria-labelledby="desktop-setup-title" :aria-busy="desktopSetupBusy">
-        <div class="desktop-setup-heading"><h3 id="desktop-setup-title">正常启动接入</h3><span>实验组件</span></div>
-        <p>设置一次，之后从 Codex 原图标打开；每个聊天仍需单独开启续跑。</p>
+        <div class="desktop-setup-heading"><h3 id="desktop-setup-title">自动连接 Codex</h3><span>测试功能</span></div>
+        <p>开启后，照常打开 Codex 就能连接，无需其他启动步骤。</p>
         <p v-if="desktopSetupError" class="dialog-error" role="alert">{{ desktopSetupError }}</p>
-        <p v-else class="desktop-setup-status" role="status">{{ !desktop ? '请在桌面应用中设置，预览不会修改本机。' : busy.has('get_desktop_setup') ? '正在检查接入组件…' : desktopSetup?.message }}</p>
-        <button class="button" :class="desktopSetup?.installed ? 'secondary' : 'primary'" :disabled="!desktop || desktopSetupBusy || !desktopSetup || (!desktopSetup.available && !desktopSetup.installed)" @click="toggleDesktopSetup">{{ busy.has('set_desktop_setup') ? '正在设置…' : desktopSetup?.installed ? '关闭接入' : '启用接入' }}</button>
+        <p v-else-if="desktopSetupNote" class="desktop-setup-status" role="status">{{ desktopSetupNote }}</p>
+        <button class="button" :class="desktopSetup?.installed ? 'secondary' : 'primary'" :disabled="!desktop || desktopSetupBusy || !desktopSetup || (!desktopSetup.available && !desktopSetup.installed)" @click="toggleDesktopSetup">{{ busy.has('set_desktop_setup') ? '正在设置…' : desktopSetup?.installed ? '关闭自动连接' : '开启自动连接' }}</button>
       </section>
-      <details class="connection-details"><summary>诊断详情</summary><dl><div v-if="snapshot.accountLabel"><dt>账户</dt><dd>{{ snapshot.accountLabel }}</dd></div><div><dt>最近核对</dt><dd class="mono">{{ formatTime(lastChecked, true) }}</dd></div></dl></details>
+      <details class="connection-details"><summary>连接详情</summary><p>原聊天续跑使用修改版 Codex 执行程序，目前仍在测试，暂不支持语音功能。</p><dl><div v-if="snapshot.codexVersion"><dt>Codex 版本</dt><dd>{{ snapshot.codexVersion }}</dd></div><div v-if="snapshot.accountLabel"><dt>账户</dt><dd>{{ snapshot.accountLabel }}</dd></div><div><dt>上次检查</dt><dd class="mono">{{ formatTime(lastChecked, true) }}</dd></div></dl></details>
       <p v-if="error" class="dialog-error" role="alert">{{ error }}</p>
       <div v-if="!demo" class="dialog-footer connection-actions">
         <a v-if="!desktop" :href="tray ? '?demo=1&view=tray' : '?demo=1'" class="button primary">查看界面预览</a>
         <template v-else>
           <button v-if="snapshot.connection === 'login_required'" class="button primary" :disabled="busy.has('login')" @click="mutate('login')">{{ busy.has('login') ? '正在打开…' : '前往官方登录' }}</button>
           <button v-if="snapshot.connection === 'missing'" class="button primary" :disabled="busy.has('open_download')" @click="mutate('open_download')">安装 Codex CLI</button>
-          <button class="button secondary" :disabled="busy.has('reconnect')" @click="mutate('reconnect')">{{ busy.has('reconnect') ? '正在连接…' : '重新检测监测连接' }}</button>
+          <button class="button secondary" :disabled="busy.has('reconnect') || desktopSetupBusy" @click="recheckConnection">{{ busy.has('reconnect') || busy.has('get_desktop_setup') ? '正在检查…' : '重新检查' }}</button>
         </template>
       </div>
     </dialog>

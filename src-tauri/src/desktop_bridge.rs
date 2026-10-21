@@ -290,6 +290,7 @@ async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, Str
     let mut child = Command::new(&config.guarded_app_server)
         .args(args)
         .env("CODEX_CLI_PATH", &config.official_cli)
+        .env("AUTORESUME_OFFICIAL_CLI", &config.official_cli)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

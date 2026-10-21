@@ -6,6 +6,9 @@ use std::{
 
 const DESKTOP_BUILD: &str = "20770";
 const RECEIPT_VERSION: u32 = 1;
+const CODE_MODE_HOST: &str = "codex-code-mode-host";
+const INVALID_INSTALLATION: &str = "自动连接设置已失效，请关闭后重新开启。";
+const UNSUPPORTED_DESKTOP: &str = "当前 Codex 版本暂不支持自动连接，请等待 AutoResume 更新。";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,36 +42,128 @@ impl Setup {
     }
 
     pub fn status(&self) -> SetupStatus {
+        // Retain the off switch even for a damaged or dangling enabled file.
+        let installed = fs::symlink_metadata(self.enabled()).is_ok();
         let result = self.read_receipt().and_then(|receipt| {
             if let Some(receipt) = receipt {
-                let installed = self.enabled().exists();
                 let profile_installed =
                     crate::desktop_profile::installed(&receipt.profile, &self.hook())?;
+                let failure = if !installed {
+                    None
+                } else if !profile_installed {
+                    Some(INVALID_INSTALLATION.to_owned())
+                } else {
+                    self.check_installed(&receipt).err().map(|error| {
+                        if error == UNSUPPORTED_DESKTOP {
+                            error
+                        } else {
+                            INVALID_INSTALLATION.into()
+                        }
+                    })
+                };
                 return Ok(SetupStatus {
-                    available: cfg!(target_os = "macos"),
+                    available: cfg!(target_os = "macos") && failure.is_none(),
                     installed,
-                    message: if installed && !profile_installed {
-                        "启动配置已变化，请关闭接入后重新设置。".into()
+                    message: if let Some(failure) = failure {
+                        failure
                     } else if installed {
-                        "已设置正常启动接入；首次设置后，请退出 Codex，再从平时的图标打开。".into()
+                        "已开启自动连接。".into()
                     } else {
-                        "桌面接入已关闭。".into()
+                        "自动连接已关闭。".into()
                     },
                 });
+            }
+            if installed {
+                return Err(INVALID_INSTALLATION.into());
             }
             self.sources()?;
             Ok(SetupStatus {
                 available: true,
                 installed: false,
-                message: "桌面接入尚未启用。".into(),
+                message: "自动连接尚未开启。".into(),
             })
         });
         result.unwrap_or_else(|message| SetupStatus {
             available: false,
             // Even a damaged receipt must leave a way to turn off the gate.
-            installed: self.enabled().exists(),
-            message,
+            installed,
+            message: if installed {
+                INVALID_INSTALLATION.into()
+            } else {
+                message
+            },
         })
+    }
+
+    fn check_installed(&self, receipt: &Receipt) -> Result<(), String> {
+        if !cfg!(target_os = "macos") || !receipt.desktop_app.is_absolute() {
+            return Err(INVALID_INSTALLATION.into());
+        }
+        // Read the pinned app metadata only: never launch Codex for status.
+        let output = std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :CFBundleVersion"])
+            .arg(receipt.desktop_app.join("Contents/Info.plist"))
+            .output()
+            .map_err(|_| INVALID_INSTALLATION)?;
+        if !output.status.success() || output.stdout.len() > 128 {
+            return Err(INVALID_INSTALLATION.into());
+        }
+        if receipt.build != DESKTOP_BUILD
+            || String::from_utf8_lossy(&output.stdout).trim() != receipt.build
+        {
+            return Err(UNSUPPORTED_DESKTOP.into());
+        }
+        let token = receipt
+            .runtime
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(INVALID_INSTALLATION)?;
+        let enabled = self.enabled();
+        require_regular(&enabled)?;
+        let metadata = fs::metadata(&enabled).map_err(|_| INVALID_INSTALLATION)?;
+        if metadata.len() != token.len() as u64 || token.len() > 128 {
+            return Err(INVALID_INSTALLATION.into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(INVALID_INSTALLATION.into());
+            }
+        }
+        if fs::read(&enabled).map_err(|_| INVALID_INSTALLATION)? != token.as_bytes() {
+            return Err(INVALID_INSTALLATION.into());
+        }
+        require_executable_helper(&self.bootstrap())?;
+        require_regular(&self.hook())?;
+        let wrapper = receipt.runtime.join("codex-autoresume-bridge");
+        require_executable_helper(&wrapper)?;
+        let config = crate::desktop_launch::BridgeConfig::load(
+            &receipt.runtime.join("bridge.json"),
+            &wrapper,
+        )?;
+        let official = receipt
+            .desktop_app
+            .join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        if config.official_cli != official.canonicalize().map_err(|_| INVALID_INSTALLATION)?
+            || config.guarded_app_server
+                != receipt
+                    .runtime
+                    .join("codex-app-server")
+                    .canonicalize()
+                    .map_err(|_| INVALID_INSTALLATION)?
+            || config.data_dir
+                != self
+                    .directory
+                    .parent()
+                    .ok_or(INVALID_INSTALLATION)?
+                    .canonicalize()
+                    .map_err(|_| INVALID_INSTALLATION)?
+        {
+            return Err(INVALID_INSTALLATION.into());
+        }
+        config.check_installed_helper()?;
+        Ok(())
     }
 
     fn enabled(&self) -> PathBuf {
@@ -111,7 +206,7 @@ impl Setup {
 
     fn sources(&self) -> Result<(PathBuf, PathBuf), String> {
         if !cfg!(target_os = "macos") {
-            return Err("正常启动接入目前仅支持 macOS；此平台暂不可启用。".into());
+            return Err("自动连接目前仅支持 macOS。".into());
         }
         let exe = std::env::current_exe().map_err(|_| "无法定位应用组件")?;
         let bridge = exe
@@ -127,14 +222,14 @@ impl Setup {
                 .join("../work/guarded-codex-build/bin/codex-app-server")
         };
         if !bridge.is_file() || !backend.is_file() {
-            return Err("当前安装包未附带完整桌面续跑组件，已有会话仍可监测。".into());
+            return Err("此版本暂不支持原聊天续跑，只能查看已有任务的状态。".into());
         }
         Ok((bridge, backend))
     }
 
     pub async fn install(&self) -> Result<SetupStatus, String> {
         if !cfg!(target_os = "macos") {
-            return Err("此平台尚不支持正常启动接入".into());
+            return Err("自动连接目前仅支持 macOS。".into());
         }
         private_directory(self.directory.parent().ok_or("应用目录无效")?)?;
         private_directory(&self.directory)?;
@@ -152,15 +247,18 @@ impl Setup {
                 break;
             }
         }
-        let desktop_app = desktop_app.ok_or("未找到已核实版本的 Codex，保留原启动方式。")?;
+        let desktop_app = desktop_app.ok_or(UNSUPPORTED_DESKTOP)?;
         let plist = desktop_app.join("Contents/Info.plist");
         let official =
             desktop_app.join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
         require_regular(&official)?;
+        // The standalone modified backend resolves this official helper beside
+        // its own executable, not beside the original CLI configured in env.
+        let code_mode_host = official_code_mode_host(&desktop_app)?;
         let profile = account_profile().await?;
         if let Some(receipt) = self.read_receipt()? {
             if self.enabled().is_file() {
-                return Err("桌面接入已经设置；如需更新组件，请先关闭接入。".into());
+                return Err("请先关闭自动连接，再重新开启以完成更新。".into());
             }
             if receipt.profile != profile {
                 crate::desktop_profile::remove(&receipt.profile, &self.hook())?;
@@ -183,6 +281,7 @@ impl Setup {
             .directory
             .join(format!("runtime-{}", uuid::Uuid::new_v4()));
         private_directory(&runtime)?;
+        link_code_mode_host(&code_mode_host, &runtime)?;
         let bridge = runtime.join("codex-autoresume-bridge");
         let backend = runtime.join("codex-app-server");
         let copy_bridge = bridge.clone();
@@ -343,6 +442,67 @@ fn copy_executable(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn official_code_mode_host(desktop_app: &Path) -> Result<PathBuf, String> {
+    if !desktop_app.is_absolute() {
+        return Err("官方 Codex 应用路径必须是绝对路径".into());
+    }
+    let source = desktop_app
+        .join("Contents/Resources/codex-cli/bin")
+        .join(CODE_MODE_HOST);
+    require_executable_helper(&source)?;
+    source
+        .canonicalize()
+        .map_err(|_| "无法确认官方代码执行组件的位置".into())
+}
+
+fn require_executable_helper(path: &Path) -> Result<(), String> {
+    require_regular(path).map_err(|_| "官方代码执行组件缺失或类型无效，尚未启用桌面接入")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(path)
+            .map_err(|_| "无法检查官方代码执行组件")?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Err("官方代码执行组件不可执行，尚未启用桌面接入".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link_code_mode_host(source: &Path, runtime: &Path) -> Result<(), String> {
+    if !source.is_absolute() || !runtime.is_absolute() {
+        return Err("桌面组件链接必须使用绝对路径".into());
+    }
+    require_executable_helper(source)?;
+    let target = runtime.join(CODE_MODE_HOST);
+    // symlink creates exclusively: never replace a pre-existing file/link.
+    // The signed official binary remains untouched, and the bootstrap's pinned
+    // Desktop build gate prevents launching against an unverified app update.
+    std::os::unix::fs::symlink(source, &target)
+        .map_err(|_| "无法建立官方代码执行组件链接；目标可能已存在，尚未启用桌面接入")?;
+    if fs::read_link(&target).map_err(|_| "无法核对代码执行组件链接")? != source
+        || target
+            .canonicalize()
+            .map_err(|_| "官方代码执行组件链接不可用")?
+            != source
+                .canonicalize()
+                .map_err(|_| "官方代码执行组件已不可用")?
+    {
+        return Err("官方代码执行组件链接核对失败，尚未启用桌面接入".into());
+    }
+    require_executable_helper(source)
+}
+
+#[cfg(not(unix))]
+fn link_code_mode_host(_source: &Path, _runtime: &Path) -> Result<(), String> {
+    Err("此平台尚未验证官方代码执行组件接入".into())
+}
+
 // SQLite's OS-backed transaction lock is released even after a crash.
 struct SetupLock {
     _connection: rusqlite::Connection,
@@ -438,6 +598,146 @@ async fn shell_cli(scoped: bool) -> Result<Option<String>, String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    struct InstalledFixture {
+        _directory: tempfile::TempDir,
+        setup: Setup,
+        runtime: PathBuf,
+        helper: PathBuf,
+        plist: PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl InstalledFixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            private_directory(directory.path()).unwrap();
+            let setup = Setup::new(directory.path(), directory.path());
+            private_directory(&setup.directory).unwrap();
+            let runtime = setup.directory.join("runtime-status-test");
+            private_directory(&runtime).unwrap();
+            let desktop_app = directory.path().join("Synthetic Codex.app");
+            let official =
+                desktop_app.join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+            fs::create_dir_all(official.parent().unwrap()).unwrap();
+            let helper = desktop_app.join("Contents/Resources/codex-cli/bin/codex-code-mode-host");
+            fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            let wrapper = runtime.join("codex-autoresume-bridge");
+            let backend = runtime.join("codex-app-server");
+            for path in [&official, &helper, &wrapper, &backend, &setup.bootstrap()] {
+                write_private(path, b"#!/bin/sh\nexit 91\n", true).unwrap();
+            }
+            link_code_mode_host(&helper.canonicalize().unwrap(), &runtime).unwrap();
+            let config = crate::desktop_launch::BridgeConfig {
+                official_cli: official,
+                guarded_app_server: backend,
+                data_dir: directory.path().into(),
+            };
+            write_private(
+                &runtime.join("bridge.json"),
+                &serde_json::to_vec(&config).unwrap(),
+                false,
+            )
+            .unwrap();
+            let profile = directory.path().join(".zshrc");
+            write_private(&setup.hook(), b"# synthetic hook\n", false).unwrap();
+            crate::desktop_profile::install(&profile, &setup.hook()).unwrap();
+            let receipt = Receipt {
+                version: RECEIPT_VERSION,
+                profile,
+                runtime: runtime.clone(),
+                desktop_app: desktop_app.clone(),
+                build: DESKTOP_BUILD.into(),
+            };
+            write_private(
+                &setup.receipt_path(),
+                &serde_json::to_vec(&receipt).unwrap(),
+                false,
+            )
+            .unwrap();
+            write_private(&setup.enabled(), b"runtime-status-test", false).unwrap();
+            let fixture = Self {
+                _directory: directory,
+                setup,
+                runtime,
+                helper,
+                plist: desktop_app.join("Contents/Info.plist"),
+            };
+            fixture.set_build(DESKTOP_BUILD);
+            assert!(fixture.setup.status().available);
+            fixture
+        }
+
+        fn set_build(&self, build: &str) {
+            fs::write(
+                &self.plist,
+                format!(
+                    "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleVersion</key><string>{build}</string></dict></plist>"
+                ),
+            )
+            .unwrap();
+        }
+
+        fn assert_disabled_with_off_switch(&self) {
+            let status = self.setup.status();
+            assert!(!status.available);
+            assert!(
+                status.installed,
+                "invalid installation must remain removable"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_status_detects_broken_components_and_preserves_disable() {
+        let fixture = InstalledFixture::new();
+        let link = fixture.runtime.join(CODE_MODE_HOST);
+        fs::remove_file(&link).unwrap();
+        fixture.assert_disabled_with_off_switch();
+        std::os::unix::fs::symlink(fixture.runtime.join("codex-app-server"), &link).unwrap();
+        fixture.assert_disabled_with_off_switch();
+        fs::remove_file(&link).unwrap();
+        link_code_mode_host(&fixture.helper.canonicalize().unwrap(), &fixture.runtime).unwrap();
+        assert!(fixture.setup.status().available);
+
+        let config_path = fixture.runtime.join("bridge.json");
+        let config = fs::read(&config_path).unwrap();
+        write_private(&config_path, b"{}", false).unwrap();
+        fixture.assert_disabled_with_off_switch();
+        write_private(&config_path, &config, false).unwrap();
+        write_private(&fixture.setup.enabled(), b"runtime-other", false).unwrap();
+        fixture.assert_disabled_with_off_switch();
+        write_private(&fixture.setup.enabled(), b"runtime-status-test", false).unwrap();
+        assert!(fixture.setup.status().available);
+
+        fs::remove_file(&fixture.helper).unwrap();
+        fixture.assert_disabled_with_off_switch();
+        assert!(!fixture.setup.disable().unwrap().installed);
+        assert!(!fixture.setup.enabled().exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_status_rejects_changed_desktop_build_without_reinstall_advice() {
+        let fixture = InstalledFixture::new();
+        fixture.set_build("99999");
+        fixture.assert_disabled_with_off_switch();
+        assert_eq!(fixture.setup.status().message, UNSUPPORTED_DESKTOP);
+        fixture.set_build(DESKTOP_BUILD);
+        assert!(fixture.setup.status().available);
+        let mut receipt = fixture.setup.read_receipt().unwrap().unwrap();
+        receipt.build = "previous-build".into();
+        write_private(
+            &fixture.setup.receipt_path(),
+            &serde_json::to_vec(&receipt).unwrap(),
+            false,
+        )
+        .unwrap();
+        fixture.assert_disabled_with_off_switch();
+        assert_eq!(fixture.setup.status().message, UNSUPPORTED_DESKTOP);
+    }
+
     #[test]
     fn setup_lock_excludes_other_connections_and_can_be_reacquired() {
         let directory = tempfile::tempdir().unwrap();
@@ -511,5 +811,83 @@ mod tests {
         )
         .unwrap();
         assert!(setup.read_receipt().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_or_non_executable_helper_refuses_preparation_before_activation() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("Codex.app");
+        let source = app
+            .join("Contents/Resources/codex-cli/bin")
+            .join(CODE_MODE_HOST);
+        let setup = Setup::new(directory.path(), directory.path());
+        assert!(official_code_mode_host(&app).is_err());
+        assert!(!setup.enabled().exists());
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(official_code_mode_host(&app).is_err());
+        assert!(!setup.enabled().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_symlink_executes_original_file_without_copying_or_modifying_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("App 'with' spaces.app");
+        let source = app
+            .join("Contents/Resources/codex-cli/bin")
+            .join(CODE_MODE_HOST);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let body = b"#!/bin/sh\nprintf '%s' \"$1\"\n";
+        fs::write(&source, body).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let original = fs::metadata(&source).unwrap();
+        let runtime = directory.path().join("runtime-test");
+        private_directory(&runtime).unwrap();
+        let resolved = official_code_mode_host(&app).unwrap();
+        link_code_mode_host(&resolved, &runtime).unwrap();
+        let target = runtime.join(CODE_MODE_HOST);
+        assert!(fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&target).unwrap(), resolved);
+        assert_eq!(fs::metadata(&target).unwrap().ino(), original.ino());
+        let result = std::process::Command::new(&target)
+            .arg("HELPER_OK")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"HELPER_OK");
+        assert_eq!(fs::read(&source).unwrap(), body);
+        assert_eq!(fs::metadata(&source).unwrap().mode(), original.mode());
+        fs::remove_file(&source).unwrap();
+        assert!(!target.is_file());
+        assert!(link_code_mode_host(&resolved, &runtime).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_preparation_never_replaces_existing_files_or_links() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("official-host");
+        fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = directory.path().join("runtime-test");
+        private_directory(&runtime).unwrap();
+        let target = runtime.join(CODE_MODE_HOST);
+        fs::write(&target, b"keep existing file").unwrap();
+        assert!(link_code_mode_host(&source, &runtime).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep existing file");
+        fs::remove_file(&target).unwrap();
+        let unrelated = directory.path().join("unrelated");
+        symlink(&unrelated, &target).unwrap();
+        assert!(link_code_mode_host(&source, &runtime).is_err());
+        assert_eq!(fs::read_link(&target).unwrap(), unrelated);
     }
 }
