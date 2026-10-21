@@ -29,9 +29,15 @@ establish that the current working tree is release-ready.
   Local tests passed: 190 Rust unit tests, six synthetic transport tests and
   15 frontend tests; frontend type checking/production build, Rust formatting,
   Clippy with warnings denied and the macOS ARM64 debug app build also passed.
-- A real Desktop restart with this handshake fix and a real quota recovery are
-  still separate acceptance steps. The isolated and synthetic results above do
-  not establish either one.
+- After the user restarted from the normal Codex icon, a read-only snapshot
+  confirmed the installed bridge matched, one live connection had
+  `installationActive: true`, and all three observed chats had `canEnable: true`.
+  All execution switches remained off; no blocking or unknown-protocol
+  diagnostics appeared. The native AutoResume UI also exposed enabled switches
+  and prompted the user to choose which chats should auto-resume.
+- This establishes normal-icon startup and continuation capability readiness on
+  this Mac. The check sent no continuation or new model request. A real quota
+  interruption, recovery and continuation in the original chat remain unverified.
 
 ## Second normal-icon startup and native initialization audit — 2026-10-21
 
