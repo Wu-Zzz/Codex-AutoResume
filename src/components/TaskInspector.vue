@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { formatTime, stateLabel } from '../api'
 import type { TaskView } from '../types'
 import folder from '../assets/figma/workbench-IconFolder1.svg'
@@ -6,14 +7,30 @@ import alert from '../assets/figma/workbench-IconAlert.svg'
 import chevron from '../assets/figma/workbench-IconChevron.svg'
 import grayDot from '../assets/figma/workbench-StatusDot5.svg'
 
-defineProps<{ task: TaskView; busy: boolean; pausedAll: boolean; checkedAt: number | null }>()
+const props = defineProps<{ task: TaskView; busy: boolean; pausedAll: boolean; checkedAt: number | null }>()
 defineEmits<{ remove: [] }>()
+
+const permissionLabel = computed(() => {
+  if (props.pausedAll) return '全局已暂停'
+  const action = props.task.mode === 'monitor' ? '监测' : '续跑'
+  return `${action}${props.task.enabled ? '已开启' : '已关闭'}`
+})
+const permissionTone = computed(() => {
+  if (props.pausedAll || !props.task.enabled || props.task.mode === 'monitor') return 'neutral'
+  return props.task.state === 'needs_attention' ? 'attention' : 'enabled'
+})
 </script>
 
 <template>
   <section class="task-inspector" aria-label="任务详情">
     <div class="inspector-heading">
-      <div class="inspector-title"><h2 :title="task.title">{{ task.title || '未命名任务' }}</h2><button v-if="task.mode !== 'desktop'" class="text-button remove-button" :disabled="busy" title="停止本工具管理，不删除原会话" @click="$emit('remove')">移出列表</button></div>
+      <div class="inspector-title">
+        <h2 :title="task.title">{{ task.title || '未命名任务' }}</h2>
+        <button v-if="task.mode !== 'desktop'" class="button remove-button" :disabled="busy" title="停止本工具管理，不删除原会话" @click="$emit('remove')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4M9 12h9"/></svg>
+          移出列表
+        </button>
+      </div>
       <p class="inspector-path"><img :src="folder" alt=""/><span :title="task.cwd">{{ task.cwd || '未指定项目' }}</span></p>
     </div>
     <div class="state-panel" :class="task.state">
@@ -22,7 +39,11 @@ defineEmits<{ remove: [] }>()
       <p v-if="task.state === 'waiting_quota'" class="quota-time">{{ task.resetsAt === null ? '额度重置时间尚不确定' : `${formatTime(task.resetsAt, true)} 后核对额度` }}</p>
     </div>
     <details class="task-diagnostics" :key="task.id">
-      <summary><img :src="chevron" alt=""/>检查详情<span>{{ pausedAll ? '全局已暂停' : task.mode !== 'monitor' ? (task.enabled ? '续跑已开启' : '续跑已关闭') : (task.enabled ? '监测已开启' : '监测已关闭') }}</span></summary>
+      <summary>
+        <img :src="chevron" alt=""/>
+        <span class="diagnostics-label">检查详情</span>
+        <span class="permission-badge" :class="permissionTone"><span aria-hidden="true"/>{{ permissionLabel }}</span>
+      </summary>
       <dl>
         <div><dt>{{ task.mode === 'managed' ? '托管编号' : '会话' }}</dt><dd class="mono selectable">{{ task.id }}</dd></div>
         <div><dt>最近核对</dt><dd class="mono">{{ formatTime(checkedAt, true) }}</dd></div>

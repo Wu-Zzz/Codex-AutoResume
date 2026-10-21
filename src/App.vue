@@ -8,7 +8,6 @@ import TaskInspector from './components/TaskInspector.vue'
 import QuotaCard from './components/QuotaCard.vue'
 import { useTheme } from './theme'
 import appMark from './assets/icon.svg'
-import pauseIcon from './assets/figma/workbench-DarkIconPause.svg'
 import expandIcon from './assets/figma/tray-DarkIconExpand.svg'
 import settingsIcon from './assets/figma/tray-DarkIconSettings.svg'
 import closeIcon from './assets/figma/picker-DarkIconClose.svg'
@@ -32,6 +31,7 @@ const capabilityDialog = ref<HTMLDialogElement | null>(null)
 const compactDetailDialog = ref<HTMLDialogElement | null>(null)
 const appearanceMenu = ref<HTMLDetailsElement | null>(null)
 const { preference: themePreference } = useTheme()
+const appearanceLabel = computed(() => `外观：${{ dark: '深色', light: '浅色', system: '跟随系统' }[themePreference.value]}`)
 const candidateTab = ref<'new' | 'existing'>('new')
 const projectPath = ref('')
 const autoResume = ref(false)
@@ -62,9 +62,9 @@ const connected = computed(() => snapshot.value.connection === 'ready')
 const desktopChatsConnected = computed(() => snapshot.value.desktopConnected)
 const capabilityLabel = computed(() => {
   if (demo) return '界面预览 · 示例数据'
-  if (desktopChatsConnected.value) return '原聊天连接 · 实验'
-  if (snapshot.value.tasks.some(task => task.mode === 'managed')) return '终端托管 · 原聊天未接入'
-  return '原聊天未接入 · 历史仅监测'
+  if (desktopChatsConnected.value) return '桌面续跑 · 实验'
+  if (snapshot.value.tasks.some(task => task.mode === 'managed')) return '终端托管 · 桌面未连接'
+  return '当前仅监测'
 })
 const autoResumeEnabledCount = computed(() => snapshot.value.tasks.filter(task => task.enabled && task.mode !== 'monitor').length)
 const connectionLabel = computed(() => demo ? '预览模式' : ({
@@ -264,10 +264,18 @@ onBeforeUnmount(() => {
     <header class="app-header" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region><img class="brand-icon" :src="appMark" alt=""/><h1 data-tauri-drag-region>{{ tray ? 'AutoResume' : 'Codex AutoResume' }}</h1><span v-if="tray" class="connection-dot" :class="snapshot.connection" :title="connectionLabel" :aria-label="connectionLabel"/></div>
       <div class="header-actions">
-        <button v-if="!tray" class="connection-button" :class="snapshot.connection" aria-label="查看连接状态" @click="showDialog(connectionDialog)"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
-        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-label="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :title="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><span v-if="snapshot.pausedAll" class="play-icon" aria-hidden="true"/><img v-else :src="pauseIcon" alt=""/></button>
+        <button v-if="!tray" class="connection-button" :class="snapshot.connection" :aria-label="`查看连接状态：${connectionLabel}`" title="查看连接状态" @click="showDialog(connectionDialog)"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
+        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-pressed="snapshot.pausedAll" :aria-label="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :title="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path v-if="snapshot.pausedAll" d="m9 5 11 7-11 7Z"/><path v-else d="M9 5v14M15 5v14"/></svg>
+        </button>
         <details ref="appearanceMenu" class="appearance-menu" @keydown.esc="appearanceMenu?.removeAttribute('open')">
-          <summary class="icon-button" aria-label="外观" title="外观"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg></summary>
+          <summary class="icon-button" :aria-label="appearanceLabel" :title="appearanceLabel">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <template v-if="themePreference === 'light'"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42m0-14.14-1.42 1.42m-11.3 11.3-1.42 1.42"/></template>
+              <path v-else-if="themePreference === 'dark'" d="M20.5 13.2A8.5 8.5 0 0 1 10.8 3.5a8.5 8.5 0 1 0 9.7 9.7Z"/>
+              <template v-else><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></template>
+            </svg>
+          </summary>
           <div class="appearance-options" role="group" aria-label="选择外观"><button v-for="option in ([{ value: 'dark', label: '深色' }, { value: 'light', label: '浅色' }, { value: 'system', label: '跟随系统' }] as const)" :key="option.value" :aria-pressed="themePreference === option.value" @click="themePreference = option.value; appearanceMenu?.removeAttribute('open')"><span>{{ option.label }}</span><span v-if="themePreference === option.value" aria-hidden="true">✓</span></button></div>
         </details>
         <button v-if="!tray" class="button primary" :disabled="loading" @click="openCandidates">添加任务</button>

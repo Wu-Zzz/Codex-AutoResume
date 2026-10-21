@@ -36,9 +36,8 @@ const source = computed(() => props.quota?.source === 'desktop' ? '原聊天账�
     </div>
     <div class="quota-windows">
       <div v-for="window in windows" :key="window.kind" class="quota-window" :class="{ exhausted: validPercent(window.usedPercent) === 100, near: (validPercent(window.usedPercent) ?? 0) >= 95 && window.usedPercent !== 100, unknown: validPercent(window.usedPercent) === null }">
-        <div class="quota-label-row"><span>{{ quotaLabel(window) }}</span><strong class="mono">{{ validPercent(window.usedPercent) === null ? '--%' : `${Number(window.usedPercent?.toFixed(1))}%` }}</strong></div>
+        <div class="quota-label-row"><span :title="quotaLabel(window)">{{ quotaLabel(window) }}</span><strong><template v-if="validPercent(window.usedPercent) !== null">已使用 <span class="mono">{{ Number(window.usedPercent?.toFixed(1)) }}%</span></template><template v-else>用量未知</template></strong></div>
         <div class="quota-bar" :class="{ uncertain: validPercent(window.usedPercent) === 100 && window.resetsAt === null }" role="progressbar" :aria-label="`${quotaLabel(window)}已使用`" :aria-valuenow="validPercent(window.usedPercent) ?? undefined" :aria-valuetext="validPercent(window.usedPercent) === null ? '使用比例未知' : `已使用 ${window.usedPercent}%`" aria-valuemin="0" aria-valuemax="100"><span v-if="validPercent(window.usedPercent) !== null" :style="{ width: `${window.usedPercent}%` }"/></div>
-        <div class="quota-use">{{ validPercent(window.usedPercent) === null ? '使用比例未知' : window.usedPercent === 100 ? '额度已用尽' : '已使用' }}</div>
         <div class="quota-reset mono" :title="window.resetsAt === null ? undefined : `重置时间 ${formatTime(window.resetsAt, true)}`">{{ quotaCountdown(window.resetsAt, now) }}</div>
       </div>
     </div>
