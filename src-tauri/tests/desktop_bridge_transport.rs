@@ -52,7 +52,8 @@ for line in sys.stdin:
         log.write(json.dumps(message) + '\n')
     method = message.get('method')
     if method == 'initialize':
-        reply(message, {'userAgent':'synthetic-desktop'})
+        reply(message, {'userAgent':'synthetic-desktop','codexHome':'/synthetic-codex-home',
+                        'platformFamily':'unix','platformOs':'macos'})
     elif method == 'initialized':
         pass
     elif method == 'autoresume/capabilities':
@@ -287,13 +288,28 @@ impl Fixture {
     }
 
     fn connect_existing_and_fail(&mut self) {
-        self.connect_existing_and_fail_with_consent(false);
+        self.connect_existing_and_fail_with_handshake(false, false);
     }
 
-    fn connect_existing_and_fail_with_consent(&mut self, before_failure: bool) {
+    fn connect_existing_and_fail_with_handshake(
+        &mut self,
+        before_failure: bool,
+        legacy_initialized: bool,
+    ) {
         self.send(json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"original_desktop","version":"fixture"},"capabilities":{"experimentalApi":true}}}));
-        self.receive_until(|value| value["id"] == 1);
-        self.send(json!({"method":"initialized","params":{}}));
+        assert_eq!(
+            self.receive_until(|value| value["id"] == 1),
+            json!({"id":1,"result":{
+                "userAgent":"synthetic-desktop","codexHome":"/synthetic-codex-home",
+                "platformFamily":"unix","platformOs":"macos"
+            }}),
+            "initialize response must retain its original native ID and all fields"
+        );
+        // Current Desktop proceeds after the successful response. Only the
+        // legacy branch sends the optional initialized notification.
+        if legacy_initialized {
+            self.send(json!({"method":"initialized","params":{}}));
+        }
         self.send(json!({"id":"resume-id","method":"thread/resume","params":{"threadId":"original-desktop-chat"}}));
         let loaded = self.receive_until(|value| value["id"] == "resume-id");
         assert_eq!(loaded["result"]["thread"]["id"], "original-desktop-chat");
@@ -648,7 +664,7 @@ fn installed_preflight_requires_current_executable_official_helper_link() {
 }
 
 #[test]
-fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
+fn desktop_initialize_without_notification_continues_original_chat_once_and_preserves_native_rpc() {
     let mut fixture = Fixture::start(false);
     assert!(fixture.control(json!({"command":"snapshot"}))["installationActive"].is_null());
     fixture.connect_existing_and_fail();
@@ -657,6 +673,17 @@ fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
             && value["params"]["turn"]["id"] == "automatic-continuation"
     });
     let requests = fixture.requests();
+    assert!(!requests
+        .iter()
+        .any(|value| value["method"] == "initialized"));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|value| value["method"] == "autoresume/capabilities")
+            .count(),
+        1,
+        "successful initialize alone must start exactly one capability probe"
+    );
     assert_eq!(
         requests
             .iter()
@@ -690,9 +717,9 @@ fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
 }
 
 #[test]
-fn new_native_input_cancels_a_held_quota_preflight_before_any_continuation() {
+fn legacy_initialized_handshake_still_cancels_held_quota_after_new_native_input() {
     let mut fixture = Fixture::start(true);
-    fixture.connect_existing_and_fail();
+    fixture.connect_existing_and_fail_with_handshake(false, true);
     fixture.wait_for_quota_preflight();
     fixture.send(
         json!({"id":"new-user-input","method":"turn/start","params":{
@@ -706,6 +733,14 @@ fn new_native_input_cancels_a_held_quota_preflight_before_any_continuation() {
     thread::sleep(Duration::from_millis(2200));
     let snapshot = fixture.control(json!({"command":"snapshot"}));
     assert_eq!(snapshot["tasks"][0]["enabled"], false);
+    assert_eq!(
+        fixture
+            .requests()
+            .iter()
+            .filter(|value| value["method"] == "initialized")
+            .count(),
+        1
+    );
     assert!(!fixture
         .requests()
         .iter()
@@ -721,7 +756,7 @@ fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
         fixture.control(json!({"command":"snapshot"}))["installationActive"],
         true
     );
-    fixture.connect_existing_and_fail_with_consent(true);
+    fixture.connect_existing_and_fail_with_handshake(true, false);
     fixture.wait_for_quota_preflight();
     let enable_file = fixture.enable_file.clone().unwrap();
     fs::remove_file(&enable_file).unwrap();

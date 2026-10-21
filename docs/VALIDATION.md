@@ -4,6 +4,35 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## Native initialization handshake — 2026-10-21
+
+- The next normal-icon restart loaded the updated bridge without any unknown
+  method diagnostics, but all four observed chats still had continuation disabled.
+  The remaining blocker was the bridge's initialization gate, not user consent.
+- The installed main Desktop connection treats the matched successful
+  `initialize` response as readiness and does not send `initialized`. Official
+  0.163 App Server likewise establishes its session during `initialize` and merely
+  logs client notifications. The bridge had incorrectly waited for that optional
+  notification before requesting its own continuation capabilities.
+- An isolated, empty `CODEX_HOME` probe against the installed backend confirmed
+  `initialize` followed directly by `autoresume/capabilities` succeeds without
+  `initialized`. The response has the four expected initialization fields and
+  advertises conditional continuation. No account, thread or model request was
+  made by this probe.
+- The bridge now accepts only the mux-matched successful `initialize` response
+  with all four known fields, then separately verifies continuation capabilities.
+  Missing, malformed or unknown fields permanently block that connection;
+  readiness does not enable a chat or authorize historical failure replay.
+- Regression coverage now uses Desktop's actual no-notification handshake,
+  retains legacy-notification coverage, and checks native IDs, response fields,
+  tool requests, single continuation and cancellation after new user input.
+  Local tests passed: 190 Rust unit tests, six synthetic transport tests and
+  15 frontend tests; frontend type checking/production build, Rust formatting,
+  Clippy with warnings denied and the macOS ARM64 debug app build also passed.
+- A real Desktop restart with this handshake fix and a real quota recovery are
+  still separate acceptance steps. The isolated and synthetic results above do
+  not establish either one.
+
 ## Second normal-icon startup and native initialization audit — 2026-10-21
 
 - A read-only snapshot after the user's restart confirmed one current installed

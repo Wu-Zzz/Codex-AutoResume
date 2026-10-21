@@ -374,6 +374,23 @@ impl DesktopGuard {
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if method == "initialize" {
+            // The original Desktop considers initialize's response sufficient;
+            // unlike some clients, it does not send an initialized notification.
+            // Only the mux's matched native request can establish readiness.
+            if message.get("error").is_none()
+                && message.get("result").is_some_and(valid_initialize_result)
+            {
+                self.ready = true;
+            } else {
+                // A legacy initialized notification must not conceal a failed
+                // handshake. Neither later success nor notifications can undo
+                // this generation's incompatibility or restore prior consent.
+                self.ready = false;
+                self.incompatible("Codex 初始化响应未通过验证，自动续跑已关闭", now);
+            }
+            return;
+        }
         if method == "account/rateLimits/read" {
             self.telemetry = message.get("result").and_then(|result| {
                 quota::parse_telemetry(result, now).map(|mut telemetry| {
@@ -464,6 +481,24 @@ impl DesktopGuard {
                     if !view.events.contains(reason) {
                         view.events.insert(0, reason.clone());
                     }
+                } else if !self.storage_ok {
+                    view.state = TaskState::NeedsAttention;
+                    view.detail = "无法保存本地状态，自动续跑已关闭".into();
+                } else if !self.compatible {
+                    view.state = TaskState::NeedsAttention;
+                    view.detail = "与 Codex 的连接已断开，自动续跑已关闭".into();
+                } else if !self.ready {
+                    view.state = TaskState::Reconciling;
+                    view.detail = "正在连接 Codex，暂时无法开启自动续跑".into();
+                } else if self.capability == Capability::Unchecked {
+                    view.state = TaskState::Reconciling;
+                    view.detail = "正在检查能否在原聊天中续跑".into();
+                } else if self.capability == Capability::Unsupported {
+                    view.state = TaskState::NeedsAttention;
+                    view.detail = "当前连接不支持自动续跑".into();
+                } else if state.awaiting_user {
+                    view.state = TaskState::NeedsAttention;
+                    view.detail = "请先在原聊天中处理审批或输入请求".into();
                 }
                 view
             })
@@ -519,7 +554,7 @@ impl DesktopGuard {
         self.native_work.clear();
         self.ready = false;
         self.compatible = false;
-        self.revoke_all("原 Desktop 连接已结束，自动续跑已关闭", now);
+        self.revoke_all("与 Codex 的连接已断开，自动续跑已关闭", now);
     }
 
     pub fn tick(&mut self, now: i64) -> Vec<GuardRequest> {
@@ -1058,6 +1093,22 @@ impl DesktopGuard {
     }
 }
 
+fn valid_initialize_result(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| object.len() == 4)
+        && ["userAgent", "platformFamily", "platformOs"]
+            .iter()
+            .all(|key| {
+                value
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+        && value
+            .get("codexHome")
+            .and_then(Value::as_str)
+            .is_some_and(|home| Path::new(home).is_absolute())
+}
+
 fn quota_failure(turn: &TurnObservation) -> bool {
     turn.status == TurnStatus::Failed && turn.error_code.as_deref() == Some("usageLimitExceeded")
 }
@@ -1383,6 +1434,170 @@ mod tests {
         let request = ready_quota_request(guard, now);
         guard.reply(request.id, &json!({"result":quota(0,None)}), now);
         one(guard.tick(now), "turn/continueIfFailed")
+    }
+
+    fn initialize_result() -> Value {
+        json!({
+            "userAgent":"codex/0.163.0",
+            "codexHome":std::env::temp_dir().join("autoresume-test-codex-home"),
+            "platformFamily":"unix",
+            "platformOs":"macos"
+        })
+    }
+
+    #[test]
+    fn desktop_initialize_response_without_notification_requires_separate_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut guard = DesktopGuard::open(&dir.path().join("desktop.sqlite")).unwrap();
+        let request = json!({"id":"native-initialize","method":"initialize","params":{
+            "clientInfo":{"name":"codex-desktop","version":"test"},
+            "capabilities":{"experimentalApi":true}
+        }});
+        guard.native_client(&request, 100);
+        assert!(guard.tick(100).is_empty());
+        assert!(!guard.ready);
+
+        guard.native_server(
+            &json!({"id":"native-initialize","result":initialize_result()}),
+            Some(&request),
+            101,
+        );
+        assert!(guard.ready);
+        let cap = one(guard.tick(101), "autoresume/capabilities");
+        assert!(guard.tick(102).is_empty(), "only one capability probe");
+        loaded(&mut guard, "thread");
+        assert!(!guard.snapshot()[0].can_enable);
+        assert!(guard.set_enabled("thread", true, 102).is_err());
+        guard.reply(
+            cap.id,
+            &json!({"result":{"version":1,"conditionalContinuation":true}}),
+            103,
+        );
+        assert!(guard.snapshot()[0].can_enable);
+        assert!(!guard.snapshot()[0].enabled, "handshake grants no consent");
+        assert!(guard.tick(103).is_empty());
+        guard.set_enabled("thread", true, 104).unwrap();
+        assert!(
+            guard.tick(104).is_empty(),
+            "historical failure is not live evidence"
+        );
+    }
+
+    #[test]
+    fn initialize_requires_matched_complete_known_success_response() {
+        let request = json!({"id":1,"method":"initialize"});
+        let mut invalid = vec![
+            json!({"id":1,"error":{"code":-32603,"message":"failed"}}),
+            json!({"id":1,"result":initialize_result(),"error":null}),
+            json!({"id":1}),
+            json!({"id":1,"result":null}),
+        ];
+        for key in ["userAgent", "codexHome", "platformFamily", "platformOs"] {
+            let mut result = initialize_result();
+            result.as_object_mut().unwrap().remove(key);
+            invalid.push(json!({"id":1,"result":result}));
+            for value in [Value::Null, json!(1), json!("")] {
+                let mut result = initialize_result();
+                result[key] = value;
+                invalid.push(json!({"id":1,"result":result}));
+            }
+        }
+        let mut result = initialize_result();
+        result["futureField"] = json!(true);
+        invalid.push(json!({"id":1,"result":result}));
+        let mut result = initialize_result();
+        result["codexHome"] = json!("relative/home");
+        invalid.push(json!({"id":1,"result":result}));
+        for response in invalid {
+            let dir = tempfile::tempdir().unwrap();
+            let mut guard = DesktopGuard::open(&dir.path().join("desktop.sqlite")).unwrap();
+            guard.native_server(&response, Some(&request), 100);
+            assert!(!guard.ready, "{response}");
+            assert!(!guard.compatible, "{response}");
+            assert!(guard.tick(100).is_empty(), "{response}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut guard = DesktopGuard::open(&dir.path().join("desktop.sqlite")).unwrap();
+        let response = json!({"id":1,"result":initialize_result()});
+        guard.native_server(&response, None, 100);
+        guard.native_server(
+            &response,
+            Some(&json!({"id":1,"method":"config/read"})),
+            100,
+        );
+        assert!(
+            !guard.ready,
+            "unmatched or other responses cannot initialize"
+        );
+        assert!(guard.compatible);
+        assert!(guard.tick(100).is_empty());
+    }
+
+    #[test]
+    fn invalid_initialize_revokes_legacy_ready_and_late_success_never_restores_consent() {
+        for invalid in [
+            json!({"id":1,"error":{"code":-32603}}),
+            json!({"id":1,"result":{"userAgent":"codex/0.163.0"}}),
+            {
+                let mut result = initialize_result();
+                result["futureField"] = json!(true);
+                json!({"id":1,"result":result})
+            },
+        ] {
+            let (_dir, mut guard) = setup();
+            enable_failure(&mut guard);
+            let quota_request = ready_quota_request(&mut guard, 101);
+            let request = json!({"id":1,"method":"initialize"});
+            guard.native_server(&invalid, Some(&request), 102);
+            assert!(!guard.ready);
+            assert!(!guard.compatible);
+            assert!(!guard.snapshot()[0].can_enable);
+            assert!(!guard.snapshot()[0].enabled);
+            guard.native_client(&json!({"method":"initialized"}), 103);
+            guard.native_server(
+                &json!({"id":1,"result":initialize_result()}),
+                Some(&request),
+                103,
+            );
+            assert!(!guard.compatible);
+            assert!(!guard.snapshot()[0].can_enable);
+            assert!(guard.set_enabled("thread", true, 103).is_err());
+            guard.reply(quota_request.id, &json!({"result":quota(0,None)}), 104);
+            assert!(guard.tick(104).is_empty());
+            assert!(guard
+                .store
+                .get_intent("thread", "failed")
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn readiness_and_capability_details_survive_ordinary_context_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut guard = DesktopGuard::open(&dir.path().join("desktop.sqlite")).unwrap();
+        loaded(&mut guard, "thread");
+        let config_changed = json!({"method":"config/value/write","params":{}});
+        guard.native_client(&config_changed, 100);
+        assert_eq!(guard.snapshot()[0].state, TaskState::Reconciling);
+        assert_eq!(
+            guard.snapshot()[0].detail,
+            "正在连接 Codex，暂时无法开启自动续跑"
+        );
+        guard.native_server(
+            &json!({"id":1,"result":initialize_result()}),
+            Some(&json!({"id":1,"method":"initialize"})),
+            101,
+        );
+        let cap = one(guard.tick(101), "autoresume/capabilities");
+        guard.native_client(&config_changed, 102);
+        assert_eq!(guard.snapshot()[0].detail, "正在检查能否在原聊天中续跑");
+        guard.reply(cap.id, &json!({"error":{"code":-32601}}), 103);
+        guard.native_client(&config_changed, 104);
+        assert_eq!(guard.snapshot()[0].state, TaskState::NeedsAttention);
+        assert_eq!(guard.snapshot()[0].detail, "当前连接不支持自动续跑");
+        assert!(!guard.snapshot()[0].can_enable);
     }
 
     #[test]
