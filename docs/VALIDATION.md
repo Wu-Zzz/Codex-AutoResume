@@ -4,6 +4,25 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## Interface corrections and activation status — 2026-10-21
+
+- Revision `35c43bb` groups quota usage with its percentage, aligns the header
+  controls at 32 px, clarifies task controls and moves the detail separator above
+  the activity history. Light/dark workbench and 380 px tray layouts were visually
+  checked; theme and pause controls worked in the demo, without horizontal overflow.
+- Type checking, all 15 frontend tests and the production build passed. The macOS
+  ARM64 debug app was rebuilt, locally signed and reopened; the updated controls,
+  quota label and detail separator were checked in its native window. No scheduler
+  code changed in this revision.
+- The attempted original-Desktop activation stopped at `quit_desktop`; the
+  original process remained running and the bridge was not loaded. The recorder
+  did not retain enough error detail to establish the exact quit failure. A later
+  native UI control attempt was explicitly denied access to Codex itself. No
+  forced exit or substitute UI automation was used after that denial.
+- Original-chat connection and a real quota recovery cycle remain unverified.
+  The published installers are unchanged; this UI update is not a completion or
+  release-readiness claim for original-chat continuation.
+
 ## Connection wording and activation preparation — 2026-10-21
 
 - The UI distinguishes the original-chat experimental connection, managed terminal
@@ -40,11 +59,11 @@ published Alpha installers have **not** been replaced.
 | Corrected test fixture | The first integration run had a metadata assertion failure because the third-party mock provider strips internal metadata. The fixture now uses OpenAI serialization against the same local mock, retains and strengthens the assertion, and all 3 tests pass |
 | Multi-instance / persistence gates | Ownership declaration and conditional write share a cross-process SQLite critical section; shared pause is persisted before IPC; known no-send/rejected attempts retain tombstones without blocking later distinct failures; uncertain writes remain blocked |
 | Quota / account display | Desktop continuation requires `ordinaryUsageAllowed = true` and all returned bucket gates; display uses the same Desktop connection, excludes account metadata and clears on account changes |
-| Local app and launcher | Updated macOS ARM64 debug `.app` built, 50.47 MiB; private manual launcher prepared and syntax checked, pins the installed Desktop build; neither app was activated |
+| Local app and launcher | Updated macOS ARM64 debug `.app` built, 50.47 MiB; private manual launcher prepared and syntax checked, pins the installed Desktop build. AutoResume was reopened; original-Desktop activation did not complete (see latest record above) |
 | Actual runtime read-only probe | The built wrapper and modified backend completed initialization, advertised conditional continuation, read the signed-in account and returned quota with the ordinary-usage gate. The bridge used an isolated state directory; zero model requests and zero thread mutations were issued |
 | Reproducibility | Source SHA256, clean patch application, Apache notices and exact local-version lock repair checked; no external dependency versions changed |
 | New-revision macOS / Windows CI | Source revision `5e81742`: [application checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448683702) and [modified-backend checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448744123) both passed. The subsequent documentation revision also passed [application CI](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39449124625) |
-| Original Desktop live activation / Chrome-CUA-MCP behavior | **Not performed**; native protocol matching is not a substitute |
+| Original Desktop live activation / Chrome-CUA-MCP behavior | **Not verified**; activation attempt stopped before the original Desktop exited, so the bridge was not loaded |
 | Real account quota exhaustion and restoration | **Not performed**; no new live inference request or existing-chat mutation was issued |
 | Windows activation | Explicitly disabled pending native environment and sandbox validation |
 
