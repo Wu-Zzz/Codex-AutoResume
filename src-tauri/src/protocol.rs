@@ -89,7 +89,7 @@ pub(crate) fn command(path: &std::path::Path) -> Result<Command, String> {
 
 impl Rpc {
     pub async fn connect() -> Result<Self, String> {
-        let path = executable().ok_or("missing:未找到 Codex，请先安装官方 Codex CLI")?;
+        let path = executable().ok_or("missing:未找到 Codex CLI；历史监测和终端托管需要此组件")?;
         let output = timeout(REQUEST_TIMEOUT, command(&path)?.arg("--version").output())
             .await
             .map_err(|_| "Codex 版本检查超时")?

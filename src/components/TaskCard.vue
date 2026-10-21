@@ -30,7 +30,7 @@ const hint = computed(() => {
       <strong class="task-name" :title="task.title">{{ task.title || '未命名任务' }}</strong>
       <span class="task-project"><img :src="folder" alt=""/><span :title="task.cwd">{{ projectName(task.cwd) }}</span><span class="task-mode">{{ task.mode === 'desktop' ? '原聊天 · 实验' : task.mode === 'managed' ? '终端托管' : '仅监测' }}</span></span>
       <span class="task-state-row">
-        <span class="status-label" :class="task.state"><img :src="dot" alt=""/>{{ stateLabel(task.state) }}</span>
+        <span class="status-label" :class="task.state"><img :src="dot" alt=""/>{{ stateLabel(task.state, task.mode) }}</span>
         <span class="task-hint" :title="hint">{{ hint }}</span>
       </span>
     </button>

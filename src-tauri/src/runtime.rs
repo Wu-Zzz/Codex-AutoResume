@@ -16,8 +16,8 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str = "普通连接仅监测。通过实验桌面连接打开的原聊天可单独开启原地续跑；需在该连接中观察到新的额度中断。终端托管模式也需单独授权。";
-const TAKEOVER_BLOCKED: &str = "仅监测已有会话；无法确认原客户端的独占执行权，不会自动续跑";
+pub const COMPATIBILITY: &str = "原聊天尚未接入。请通过桌面续跑启动器重新打开 Codex，再在原窗口中打开需要守护的聊天。桌面连接目前为实验功能。";
+const TAKEOVER_BLOCKED: &str = "此条目来自历史列表，仅监测；原聊天续跑需使用桌面连接";
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -34,6 +34,7 @@ pub struct Snapshot {
     pub codex_version: Option<String>,
     pub account_label: Option<String>,
     pub compatibility_message: Option<String>,
+    pub desktop_connected: bool,
     pub paused_all: bool,
     pub checked_at: Option<i64>,
     pub quota: Option<QuotaTelemetry>,
@@ -48,6 +49,7 @@ impl Default for Snapshot {
             codex_version: None,
             account_label: None,
             compatibility_message: Some(COMPATIBILITY.into()),
+            desktop_connected: false,
             paused_all: false,
             checked_at: None,
             quota: None,
@@ -154,19 +156,21 @@ impl AppState {
                 resets_at: task.resets_at,
                 events: task.events,
             }));
-        let (desktop, desktop_quota) = self.desktop.snapshot().await;
-        if !desktop.is_empty() {
+        let desktop = self.desktop.snapshot().await;
+        snapshot.desktop_connected = desktop.connected;
+        if desktop.connected {
             snapshot.connection = "ready".into();
-            snapshot.connection_message = "原 Desktop 已连接 · 实验桥接".into();
+            snapshot.connection_message = "已连接原 Codex 聊天 · 实验连接".into();
             snapshot.codex_version = None;
             snapshot.account_label = None;
-            snapshot.quota = desktop_quota;
+            snapshot.quota = desktop.quota;
+            snapshot.checked_at = Some(now());
             snapshot
                 .tasks
-                .retain(|task| !desktop.iter().any(|native| native.id == task.id));
-            snapshot.tasks.extend(desktop);
+                .retain(|task| !desktop.tasks.iter().any(|native| native.id == task.id));
+            snapshot.tasks.extend(desktop.tasks);
             snapshot.compatibility_message = Some(
-                "已连接实验桌面桥接。开启所选原聊天后，仅对本次连接中确认的额度中断原地续跑。桌面重启后需重新开启。".into(),
+                "已接入原 Codex 聊天。在 Codex 中打开聊天后，可单独开启续跑；只处理接入后确认的额度中断。桌面连接目前为实验功能。".into(),
             );
         }
         Ok(snapshot)
@@ -196,7 +200,7 @@ fn candidate(thread: &Value) -> Result<Candidate, String> {
             .unwrap_or("")
             .into(),
         updated_at: thread.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
-        status: "接管状态未知".into(),
+        status: "历史监测".into(),
         eligible: false,
         reason: Some(TAKEOVER_BLOCKED.into()),
     })

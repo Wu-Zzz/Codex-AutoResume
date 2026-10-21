@@ -214,12 +214,12 @@ impl DesktopGuard {
                 // Approval, input, dynamic tools, auth and future capabilities
                 // stay entirely in the original Desktop connection.
                 if let Some(id) = thread {
-                    self.revoke_thread(id, "Codex 需要客户端处理，自动续跑已关闭", now);
+                    self.revoke_thread(id, "请回原聊天处理，自动续跑已关闭", now);
                     if let Some(state) = self.threads.get_mut(id) {
                         state.awaiting_user = true;
                     }
                 } else {
-                    self.revoke_all("Codex 需要客户端处理，自动续跑已关闭", now);
+                    self.revoke_all("请回原聊天处理，自动续跑已关闭", now);
                 }
                 return;
             }
@@ -812,7 +812,7 @@ impl DesktopGuard {
         task.needs_reconciliation = false;
         task.set_status(
             TaskState::Paused,
-            "原 Desktop 聊天已连接；自动续跑未开启",
+            "原 Codex 聊天已连接；自动续跑未开启",
             now,
         );
         self.threads.insert(

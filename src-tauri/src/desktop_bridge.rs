@@ -402,6 +402,12 @@ pub struct DesktopHub {
     directory: PathBuf,
 }
 
+pub struct DesktopSnapshot {
+    pub connected: bool,
+    pub tasks: Vec<TaskView>,
+    pub quota: Option<crate::quota::QuotaTelemetry>,
+}
+
 impl DesktopHub {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -452,11 +458,12 @@ impl DesktopHub {
     }
 
     pub async fn views(&self) -> Vec<TaskView> {
-        self.snapshot().await.0
+        self.snapshot().await.tasks
     }
 
-    pub async fn snapshot(&self) -> (Vec<TaskView>, Option<crate::quota::QuotaTelemetry>) {
+    pub async fn snapshot(&self) -> DesktopSnapshot {
         let instances = self.instances().await;
+        let connected = !instances.is_empty();
         let mut counts = HashMap::new();
         for (_, response) in &instances {
             for task in &response.tasks {
@@ -492,7 +499,11 @@ impl DesktopHub {
         }
         let mut views: Vec<_> = views.into_values().collect();
         views.sort_by(|a, b| a.id.cmp(&b.id));
-        (views, quota)
+        DesktopSnapshot {
+            connected,
+            tasks: views,
+            quota,
+        }
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, String> {
@@ -944,11 +955,15 @@ mod tests {
                 })
                 .ok();
         });
-        let instances = DesktopHub::new(directory.path()).instances().await;
-        assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].0.generation, live.generation);
+        let snapshot = DesktopHub::new(directory.path()).snapshot().await;
+        // A connected Desktop with no open chats must not be shown as absent.
+        assert!(snapshot.connected);
+        assert!(snapshot.tasks.is_empty());
+        assert!(snapshot.quota.is_none());
         assert!(!dead_path.exists());
         reply.await.unwrap();
         accept.abort();
+        let _ = accept.await;
+        assert!(!DesktopHub::new(directory.path()).snapshot().await.connected);
     }
 }

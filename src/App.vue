@@ -20,6 +20,7 @@ import blueDot from './assets/figma/picker-StatusDot.svg'
 const tray = new URLSearchParams(window.location.search).get('view') === 'tray'
 const snapshot = ref<Snapshot>({
   connection: 'checking', connectionMessage: '正在检查本机 Codex…', codexVersion: null,
+  desktopConnected: false,
   accountLabel: null, compatibilityMessage: null, pausedAll: false, tasks: [],
 })
 const loading = ref(true)
@@ -58,7 +59,14 @@ watch(filteredTasks, tasks => {
   if (!tasks.some(task => task.id === selectedTaskId.value)) selectedTaskId.value = tasks[0]?.id ?? ''
 })
 const connected = computed(() => snapshot.value.connection === 'ready')
-const desktopChatsConnected = computed(() => snapshot.value.tasks.some(task => task.mode === 'desktop'))
+const desktopChatsConnected = computed(() => snapshot.value.desktopConnected)
+const capabilityLabel = computed(() => {
+  if (demo) return '界面预览 · 示例数据'
+  if (desktopChatsConnected.value) return '原聊天连接 · 实验'
+  if (snapshot.value.tasks.some(task => task.mode === 'managed')) return '终端托管 · 原聊天未接入'
+  return '原聊天未接入 · 历史仅监测'
+})
+const autoResumeEnabledCount = computed(() => snapshot.value.tasks.filter(task => task.enabled && task.mode !== 'monitor').length)
 const connectionLabel = computed(() => demo ? '预览模式' : ({
   checking: '正在连接', ready: '已连接', missing: '未连接', error: '连接异常', login_required: '需要登录',
 })[snapshot.value.connection])
@@ -257,7 +265,7 @@ onBeforeUnmount(() => {
       <div class="brand" data-tauri-drag-region><img class="brand-icon" :src="appMark" alt=""/><h1 data-tauri-drag-region>{{ tray ? 'AutoResume' : 'Codex AutoResume' }}</h1><span v-if="tray" class="connection-dot" :class="snapshot.connection" :title="connectionLabel" :aria-label="connectionLabel"/></div>
       <div class="header-actions">
         <button v-if="!tray" class="connection-button" :class="snapshot.connection" aria-label="查看连接状态" @click="showDialog(connectionDialog)"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
-        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-label="snapshot.pausedAll ? '恢复全部' : '暂停全部'" :title="snapshot.pausedAll ? '恢复全部' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><span v-if="snapshot.pausedAll" class="play-icon" aria-hidden="true"/><img v-else :src="pauseIcon" alt=""/></button>
+        <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-label="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :title="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })"><span v-if="snapshot.pausedAll" class="play-icon" aria-hidden="true"/><img v-else :src="pauseIcon" alt=""/></button>
         <details ref="appearanceMenu" class="appearance-menu" @keydown.esc="appearanceMenu?.removeAttribute('open')">
           <summary class="icon-button" aria-label="外观" title="外观"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg></summary>
           <div class="appearance-options" role="group" aria-label="选择外观"><button v-for="option in ([{ value: 'dark', label: '深色' }, { value: 'light', label: '浅色' }, { value: 'system', label: '跟随系统' }] as const)" :key="option.value" :aria-pressed="themePreference === option.value" @click="themePreference = option.value; appearanceMenu?.removeAttribute('open')"><span>{{ option.label }}</span><span v-if="themePreference === option.value" aria-hidden="true">✓</span></button></div>
@@ -266,8 +274,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <div class="capability-bar">
-      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">{{ desktopChatsConnected ? '原聊天续跑 · 实验连接' : '普通连接仅监测已有会话' }}</button>
-      <span v-if="snapshot.pausedAll" class="paused-label" role="status">已全部暂停</span>
+      <button id="capability-status" class="capability-status" @click="showDialog(capabilityDialog)">{{ capabilityLabel }}</button>
+      <span v-if="snapshot.pausedAll" class="paused-label" role="status">续跑已暂停</span>
     </div>
     <div v-if="error && !candidatesDialog?.open && !connectionDialog?.open" class="error-notice" role="alert"><p>{{ error }}</p><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><img :src="closeIcon" alt=""/></button></div>
     <main class="workspace">
@@ -281,9 +289,9 @@ onBeforeUnmount(() => {
             <button :class="{ active: taskFilter === 'needs_attention' }" :aria-pressed="taskFilter === 'needs_attention'" @click="taskFilter = 'needs_attention'">需处理 {{ attentionCount }}</button>
           </div>
         </template>
-        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>{{ snapshot.tasks.filter(task => task.mode !== 'monitor').length }} 个可续跑</span></div>
+        <div v-else class="queue-heading"><h2>任务 {{ snapshot.tasks.length }}</h2><span>{{ snapshot.pausedAll ? '续跑已暂停' : `${autoResumeEnabledCount} 个续跑已开启` }}</span></div>
         <div v-if="loading" class="empty-state" aria-live="polite"><span class="spinner" aria-hidden="true"/><p>正在连接 Codex…</p></div>
-        <div v-else-if="!snapshot.tasks.length" class="empty-state"><span class="empty-mark" aria-hidden="true">＋</span><h2>暂无任务</h2><p>从添加任务开始</p></div>
+        <div v-else-if="!snapshot.tasks.length" class="empty-state"><span class="empty-mark" aria-hidden="true">＋</span><h2>暂无任务</h2><p>{{ desktopChatsConnected ? '在 Codex 中打开需要守护的聊天' : '从添加任务开始' }}</p></div>
         <div v-else-if="!filteredTasks.length" class="empty-state"><p>没有匹配的任务</p></div>
         <div v-else class="task-list">
           <TaskCard v-for="task in filteredTasks" :key="task.id" :task="task" :selected="!tray && selectedTaskId === task.id" :busy="busy.has(task.id)" :paused-all="snapshot.pausedAll" @select="selectTask(task)" @toggle="mutate('set_task_enabled', { threadId: task.id, enabled: !task.enabled }, task.id)"/>
@@ -308,21 +316,22 @@ onBeforeUnmount(() => {
         <a v-if="!desktop" :href="tray ? '?demo=1&view=tray' : '?demo=1'" class="button primary">查看界面预览</a>
         <template v-else>
           <button v-if="snapshot.connection === 'login_required'" class="button primary" :disabled="busy.has('login')" @click="mutate('login')">{{ busy.has('login') ? '正在打开…' : '前往官方登录' }}</button>
-          <button v-if="snapshot.connection === 'missing'" class="button primary" :disabled="busy.has('open_download')" @click="mutate('open_download')">安装 Codex</button>
-          <button class="button secondary" :disabled="busy.has('reconnect')" @click="mutate('reconnect')">{{ busy.has('reconnect') ? '正在连接…' : '重新检测' }}</button>
+          <button v-if="snapshot.connection === 'missing'" class="button primary" :disabled="busy.has('open_download')" @click="mutate('open_download')">安装 Codex CLI</button>
+          <button class="button secondary" :disabled="busy.has('reconnect')" @click="mutate('reconnect')">{{ busy.has('reconnect') ? '正在连接…' : '重新检测监测连接' }}</button>
         </template>
       </div>
     </dialog>
     <dialog ref="capabilityDialog" class="dialog capability-dialog" aria-labelledby="capability-title" @close="restoreFocus">
       <div class="dialog-header"><h2 id="capability-title">续跑范围</h2><button class="icon-button" aria-label="关闭能力说明" autofocus @click="capabilityDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
-      <p class="dialog-description">原聊天通过实验桌面连接接入后，会出现在任务列表中。单独开启开关，才会在本次连接确认额度中断后原地续跑。普通历史列表仍仅监测。</p>
-      <p class="capability-reason">{{ snapshot.compatibilityMessage || '托管续跑仍处于测试阶段。遇到审批、用户停止或执行状态不明时会暂停，等待你处理。' }}</p>
+      <p v-if="snapshot.compatibilityMessage" class="dialog-description">{{ snapshot.compatibilityMessage }}</p>
+      <p class="capability-reason">终端任务需单独开启续跑；从历史列表加入的任务仅监测。</p>
+      <p class="capability-reason">暂停或重启后，原聊天需重新开启续跑。</p>
     </dialog>
     <dialog ref="candidatesDialog" class="dialog candidate-dialog" aria-labelledby="candidate-title" @close="restoreFocus">
       <div class="dialog-header"><h2 id="candidate-title">添加任务</h2><button class="icon-button" aria-label="关闭任务选择" @click="candidatesDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
       <div class="add-task-tabs" role="tablist" aria-label="添加方式">
-        <button role="tab" :aria-selected="candidateTab === 'new'" aria-controls="new-task-panel" @click="candidateTab = 'new'">新建任务</button>
-        <button role="tab" :aria-selected="candidateTab === 'existing'" aria-controls="existing-task-panel" @click="showExisting">已有会话</button>
+        <button role="tab" :aria-selected="candidateTab === 'new'" aria-controls="new-task-panel" @click="candidateTab = 'new'">新建终端任务</button>
+        <button role="tab" :aria-selected="candidateTab === 'existing'" aria-controls="existing-task-panel" @click="showExisting">历史监测</button>
       </div>
       <form v-if="candidateTab === 'new'" id="new-task-panel" class="new-task-form" role="tabpanel" @submit.prevent="launchManaged">
         <label class="project-label" for="project-path">项目文件夹</label>
@@ -341,10 +350,10 @@ onBeforeUnmount(() => {
       <div v-else class="candidate-list">
         <article v-for="candidate in filteredCandidates" :key="candidate.id" class="candidate-item">
           <div class="candidate-content"><h3 :title="candidate.title">{{ candidate.title || '未命名任务' }}</h3><p><span :title="candidate.cwd">{{ projectName(candidate.cwd) }}</span><span aria-hidden="true">·</span><time>{{ formatTime(candidate.updatedAt, true) }}</time></p></div>
-          <button class="text-button candidate-add" :aria-label="`加入${candidate.title || '未命名任务'}监测列表`" :disabled="busy.has('add_task')" @click="addCandidate(candidate)">加入</button>
+          <button class="text-button candidate-add" :aria-label="`加入${candidate.title || '未命名任务'}监测列表`" :disabled="busy.has('add_task')" @click="addCandidate(candidate)">加入监测</button>
         </article>
       </div>
-      <p class="candidate-note">加入后默认关闭监测；不会执行原任务。</p>
+      <p class="candidate-note">原聊天续跑需先接入桌面连接，并在 Codex 中打开该聊天。</p>
       </section>
     </dialog>
     <dialog ref="compactDetailDialog" class="dialog compact-detail-dialog" aria-label="任务详情" @close="restoreFocus">

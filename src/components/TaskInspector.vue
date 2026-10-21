@@ -17,7 +17,7 @@ defineEmits<{ remove: [] }>()
       <p class="inspector-path"><img :src="folder" alt=""/><span :title="task.cwd">{{ task.cwd || '未指定项目' }}</span></p>
     </div>
     <div class="state-panel" :class="task.state">
-      <h3><img v-if="task.state === 'needs_attention'" :src="alert" alt=""/><span v-else class="state-orb" aria-hidden="true"/>{{ stateLabel(task.state) }}</h3>
+      <h3><img v-if="task.state === 'needs_attention'" :src="alert" alt=""/><span v-else class="state-orb" aria-hidden="true"/>{{ stateLabel(task.state, task.mode) }}</h3>
       <p>{{ task.detail || '暂无更多状态信息。' }}</p>
       <p v-if="task.state === 'waiting_quota'" class="quota-time">{{ task.resetsAt === null ? '额度重置时间尚不确定' : `${formatTime(task.resetsAt, true)} 后核对额度` }}</p>
     </div>
@@ -26,8 +26,8 @@ defineEmits<{ remove: [] }>()
       <dl>
         <div><dt>{{ task.mode === 'managed' ? '托管编号' : '会话' }}</dt><dd class="mono selectable">{{ task.id }}</dd></div>
         <div><dt>最近核对</dt><dd class="mono">{{ formatTime(checkedAt, true) }}</dd></div>
-        <div><dt>管理方式</dt><dd>{{ task.mode === 'desktop' ? '原 Desktop 聊天 · 实验桥接' : task.mode === 'managed' ? '本工具启动 · 终端托管' : '已有会话 · 仅监测' }}</dd></div>
-        <div><dt>自动续跑</dt><dd>{{ task.mode !== 'monitor' ? (task.enabled ? '已授权' : '未开启') : '不接管原会话' }}</dd></div>
+        <div><dt>管理方式</dt><dd>{{ task.mode === 'desktop' ? '原 Codex 聊天 · 实验连接' : task.mode === 'managed' ? '本工具启动 · 终端托管' : '已有会话 · 仅监测' }}</dd></div>
+        <div><dt>自动续跑</dt><dd>{{ task.mode !== 'monitor' ? (task.enabled ? '已授权' : '未开启') : '此条目仅监测' }}</dd></div>
       </dl>
     </details>
     <div class="activity">

@@ -1,11 +1,12 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import type { Candidate, Snapshot } from './types'
+import type { Candidate, Snapshot, TaskView } from './types'
 
 export const desktop = isTauri()
 export const demo = !desktop && new URLSearchParams(window.location.search).get('demo') === '1'
 
 const previewSnapshot: Snapshot = {
   connection: 'ready',
+  desktopConnected: false,
   connectionMessage: '界面预览 · 未连接真实 Codex',
   codexVersion: '预览',
   accountLabel: null,
@@ -69,6 +70,7 @@ export async function call<T>(command: string, args?: Record<string, unknown>): 
   if (demo) return previewCommand<T>(command, args)
   if (command === 'get_snapshot') return {
     connection: 'missing', connectionMessage: '请在桌面应用中连接本机 Codex。',
+    desktopConnected: false,
     codexVersion: null, accountLabel: null, compatibilityMessage: null, pausedAll: false, tasks: [],
   } as T
   throw new Error('浏览器无法连接本机 Codex，请打开桌面应用。')
@@ -87,10 +89,11 @@ export function projectName(cwd: string): string {
 const stateLabels: Record<string, string> = {
   running: '执行中', waiting_quota: '等待额度', checking: '正在核对',
   needs_attention: '需要处理', completed: '本轮已结束', paused: '已暂停', ready: '观察中',
-  monitoring: '观察中', reconciling: '正在核对',
+  reconciling: '正在核对',
 }
 
-export function stateLabel(state: string): string {
+export function stateLabel(state: string, mode: TaskView['mode'] = 'monitor'): string {
+  if (state === 'monitoring') return mode === 'monitor' ? '监测中' : '续跑待命'
   return stateLabels[state] ?? '需要核对'
 }
 

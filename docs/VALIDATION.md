@@ -1,8 +1,26 @@
 # Validation record
 
-Updated 2026-10-20, Asia/Taipei. The managed execution revision is **Alpha**.
+Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
+
+## Connection wording and activation preparation — 2026-10-21
+
+- The UI distinguishes the original-chat experimental connection, managed terminal
+  tasks and history-only monitoring. Counts describe enabled continuation, not
+  every task that happens to use an executing adapter. Unpausing no longer says
+  that it re-enables revoked Desktop consent. Quota labels identify their source.
+- The Rust snapshot reports a live Desktop connection even before any chat is
+  opened; the authenticated-loopback test also verifies disappearance after the
+  connection closes. This is connection status, not execution authorization.
+- Frontend type checking, 15 frontend tests, production build, 143 Rust unit
+  tests, 2 wrapper integration tests, formatting and all-target Clippy passed.
+  The Mac ARM64 debug bundle was rebuilt. Its incomplete development signature
+  was replaced with a local ad-hoc signature and passed strict deep verification;
+  the official Codex application was not modified.
+- The user authorized restarting both applications for a read-only Desktop
+  connection check. A one-shot restart and result recorder is prepared under
+  ignored `work/`; this record does not yet claim that activation completed.
 
 ## Original Desktop chat bridge — 2026-10-20 source revision
 
@@ -25,7 +43,7 @@ published Alpha installers have **not** been replaced.
 | Local app and launcher | Updated macOS ARM64 debug `.app` built, 50.47 MiB; private manual launcher prepared and syntax checked, pins the installed Desktop build; neither app was activated |
 | Actual runtime read-only probe | The built wrapper and modified backend completed initialization, advertised conditional continuation, read the signed-in account and returned quota with the ordinary-usage gate. The bridge used an isolated state directory; zero model requests and zero thread mutations were issued |
 | Reproducibility | Source SHA256, clean patch application, Apache notices and exact local-version lock repair checked; no external dependency versions changed |
-| New-revision macOS / Windows CI | Source revision `5e81742`: [application checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448683702) and [modified-backend checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448744123) started; results still pending at this update |
+| New-revision macOS / Windows CI | Source revision `5e81742`: [application checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448683702) and [modified-backend checks](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39448744123) both passed. The subsequent documentation revision also passed [application CI](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39449124625) |
 | Original Desktop live activation / Chrome-CUA-MCP behavior | **Not performed**; native protocol matching is not a substitute |
 | Real account quota exhaustion and restoration | **Not performed**; no new live inference request or existing-chat mutation was issued |
 | Windows activation | Explicitly disabled pending native environment and sandbox validation |

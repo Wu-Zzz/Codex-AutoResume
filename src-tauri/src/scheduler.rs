@@ -181,7 +181,7 @@ pub fn observe_turn(task: &mut TaskRecord, turn: &TurnObservation, now: i64) {
         TurnStatus::Interrupted => {
             // Manual stop revokes automatic continuation until the user enables it again.
             task.enabled = false;
-            task.set_status(TaskState::Paused, "任务已停止，监测已关闭", now);
+            task.set_status(TaskState::Paused, "任务已停止，开关已关闭", now);
         }
         TurnStatus::Failed if task.enabled => {
             task.set_status(
@@ -197,7 +197,7 @@ pub fn observe_turn(task: &mut TaskRecord, turn: &TurnObservation, now: i64) {
         _ => {}
     }
     if !task.enabled && task.state != TaskState::Paused {
-        task.set_status(TaskState::Paused, "监测已关闭", now);
+        task.set_status(TaskState::Paused, "任务开关已关闭", now);
     }
 }
 

@@ -20,7 +20,7 @@ const windows = computed<QuotaWindow[]>(() => selected.value?.windows.length ? s
   { kind: 'primary', durationMins: null, usedPercent: null, resetsAt: null },
   { kind: 'secondary', durationMins: null, usedPercent: null, resetsAt: null },
 ])
-const source = computed(() => props.quota?.source === 'managed' ? '托管账户' : '本地账户')
+const source = computed(() => props.quota?.source === 'desktop' ? '原聊天账户' : props.quota?.source === 'managed' ? '终端账户' : '监测账户')
 </script>
 
 <template>
