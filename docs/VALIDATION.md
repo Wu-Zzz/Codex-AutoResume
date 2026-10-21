@@ -4,6 +4,40 @@ Updated 2026-10-21, Asia/Taipei. The execution revision is **Alpha**.
 Historical results below remain attached to their original code and do not
 establish that the current working tree is release-ready.
 
+## Normal-icon integration — 2026-10-21
+
+- The inspected macOS Desktop build `20770` loads its login/interactive shell
+  environment with `CODEX_SHELL=1` before selecting the CLI. The new connection
+  setting installs one removable conditional zsh block and private runtime files;
+  it does not change the official app, system-global environment, credentials,
+  databases, or rollout files. This is a version-specific experimental entry,
+  not a documented general extension API.
+- Original profile bytes and POSIX permissions are preserved. Conflicting custom
+  CLI configuration is rejected. Missing components, invalid configuration or a
+  different Desktop build fall back to the official CLI before backend startup;
+  failures after guarded execution begins never start a replacement backend.
+- Removing or replacing the installation token permanently retires an old live
+  bridge's automatic controls, while original Desktop traffic remains usable.
+  Installation does not authorize any chat. Per-chat consent is still explicit
+  and bound to the live connection and observed failed turn.
+- Current local checks passed: frontend type checking, 15 frontend tests and
+  production build; 165 Rust unit tests, 4 wrapper/fake-backend process tests,
+  formatting and all-target Clippy with warnings denied. Tests include shell
+  quoting and unrelated environment preservation, profile conflicts/rollback,
+  crash-released setup locking, zero-backend configuration preflight, and live
+  installation revocation without quota-reply replay.
+- The macOS ARM64 debug app was rebuilt (50.88 MiB), locally ad-hoc signed,
+  and passed strict deep signature verification. Its native connection dialog
+  successfully installed the one-time entry. A hash comparison confirmed every
+  original profile byte outside the owned block and its POSIX mode were retained.
+  Ordinary shell startup did not select the bridge; the Codex-scoped shell did.
+  The installed wrapper's configuration preflight and official `--version`
+  passthrough succeeded without protocol output or model requests. The installed
+  runtime is under private application support, independent of the work checkout.
+- Normal-icon original Desktop connection and actual quota exhaustion/recovery
+  remain separate, pending acceptance. No live model prompt was submitted for
+  this integration change. Windows execution activation remains unavailable.
+
 ## Interface corrections and activation status — 2026-10-21
 
 - Revision `35c43bb` groups quota usage with its percentage, aligns the header

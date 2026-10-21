@@ -231,6 +231,14 @@ dd { margin: 0; min-width: 0; text-align: right; color: var(--secondary); overfl
 .connection-message p { margin: 0; color: var(--secondary); font-size: 13px; line-height: 21px; overflow-wrap: anywhere; }
 .connection-details { margin-top: 16px; font-size: 12px; color: var(--muted); }
 .connection-details summary { cursor: pointer; line-height: 20px; }
+.desktop-setup { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+.desktop-setup-heading { display: flex; align-items: baseline; gap: 8px; }
+.desktop-setup-heading h3 { margin: 0; font-size: 14px; font-weight: 500; line-height: 22px; }
+.desktop-setup-heading > span { color: var(--muted); font-size: 12px; line-height: 18px; }
+.desktop-setup > p { margin: 8px 0 0; color: var(--secondary); font-size: 13px; line-height: 21px; overflow-wrap: anywhere; }
+.desktop-setup > .desktop-setup-status { color: var(--muted); }
+.desktop-setup > .dialog-error { color: var(--red); }
+.desktop-setup > .button { margin-top: 12px; }
 .dialog-footer { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
 .dialog-error { margin: 12px 0; padding: 12px; color: var(--red); background: var(--red-surface); border-radius: 6px; font-size: 13px; line-height: 21px; overflow-wrap: anywhere; }
 .dialog-error > button { display: block; color: inherit; margin-top: 4px; }

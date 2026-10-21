@@ -47,6 +47,12 @@ export interface Snapshot {
   quota?: QuotaTelemetry | null
 }
 
+export interface DesktopSetup {
+  available: boolean
+  installed: boolean
+  message: string
+}
+
 export interface Candidate {
   id: string
   title: string

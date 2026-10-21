@@ -29,6 +29,124 @@ use uuid::Uuid;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 const GUI_LEASE: Duration = Duration::from_secs(20);
 const MAX_CONTROL_BYTES: u64 = 64 * 1024;
+const ENABLE_FILE_ENV: &str = "AUTORESUME_DESKTOP_ENABLE_FILE";
+const ENABLE_TOKEN_ENV: &str = "AUTORESUME_DESKTOP_ENABLE_TOKEN";
+const MAX_ENABLE_TOKEN_BYTES: u64 = 128;
+
+/// Installation consent belongs to one prepared runtime. Disabling or replacing
+/// its token permanently retires this bridge's automatic control, while native
+/// Desktop traffic continues over the same connection.
+enum InstallationGate {
+    Manual,
+    Enabled { path: PathBuf, token: String },
+    Revoked,
+}
+
+impl InstallationGate {
+    fn from_environment() -> Self {
+        Self::new(
+            std::env::var_os(ENABLE_FILE_ENV),
+            std::env::var_os(ENABLE_TOKEN_ENV),
+        )
+    }
+
+    fn new(path: Option<OsString>, token: Option<OsString>) -> Self {
+        match (path, token) {
+            (None, None) => Self::Manual,
+            (Some(path), Some(token)) => {
+                let path = PathBuf::from(path);
+                let Ok(token) = token.into_string() else {
+                    return Self::Revoked;
+                };
+                if !path.is_absolute()
+                    || token.is_empty()
+                    || token.len() > MAX_ENABLE_TOKEN_BYTES as usize
+                    || token.chars().any(char::is_control)
+                {
+                    return Self::Revoked;
+                }
+                let mut gate = Self::Enabled { path, token };
+                gate.check();
+                gate
+            }
+            _ => Self::Revoked,
+        }
+    }
+
+    fn check(&mut self) -> bool {
+        let allowed = match self {
+            Self::Manual => true,
+            Self::Enabled { path, token } => enable_token_matches(path, token),
+            Self::Revoked => false,
+        };
+        if !allowed {
+            *self = Self::Revoked;
+        }
+        allowed
+    }
+
+    fn enforce(&mut self, guard: &mut DesktopGuard, now: i64) -> bool {
+        if self.check() {
+            true
+        } else {
+            // Native events may still update observations after revocation.
+            // Clear readiness and pending automatic work before exposing a
+            // control snapshot or considering another automatic send.
+            guard.disconnected(now);
+            false
+        }
+    }
+}
+
+fn enable_token_matches(path: &Path, token: &str) -> bool {
+    let verify = || -> Option<bool> {
+        let before = fs::symlink_metadata(path).ok()?;
+        if !private_enable_file(&before) {
+            return Some(false);
+        }
+        let file = fs::File::open(path).ok()?;
+        let opened = file.metadata().ok()?;
+        if !same_enable_file(&before, &opened) {
+            return Some(false);
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, MAX_ENABLE_TOKEN_BYTES + 1),
+            &mut bytes,
+        )
+        .ok()?;
+        let after = fs::symlink_metadata(path).ok()?;
+        Some(same_enable_file(&opened, &after) && bytes == token.as_bytes())
+    };
+    verify().unwrap_or(false)
+}
+
+fn private_enable_file(metadata: &fs::Metadata) -> bool {
+    let regular = metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.len() <= MAX_ENABLE_TOKEN_BYTES;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        regular && metadata.permissions().mode() & 0o077 == 0
+    }
+    #[cfg(not(unix))]
+    regular
+}
+
+fn same_enable_file(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    let same = private_enable_file(before)
+        && private_enable_file(after)
+        && before.len() == after.len()
+        && before.modified().ok() == after.modified().ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        same && before.dev() == after.dev() && before.ino() == after.ino()
+    }
+    #[cfg(not(unix))]
+    same
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -147,6 +265,7 @@ pub fn run(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, String> {
 }
 
 async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, String> {
+    let mut installation_gate = InstallationGate::from_environment();
     let generation = Uuid::new_v4().to_string();
     let directory = config.data_dir.join("desktop-bridge");
     private_directory(&directory)?;
@@ -273,18 +392,27 @@ async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, Str
                     }
                 }
                 Some(control) = control_rx.recv() => {
+                    let installation_enabled = installation_gate.enforce(&mut guard, now());
                     last_control = Some(Instant::now());
                     lease_expired = false;
                     let error = match control.request {
                         ControlCommand::Snapshot => None,
                         ControlCommand::SetEnabled { thread_id, enabled } => {
-                            if enabled && !protocol_usable {
+                            if enabled && !installation_enabled {
+                                Some("此桌面接入已关闭或更新，请重新打开 Codex 后再开启续跑".into())
+                            } else if enabled && !protocol_usable {
                                 Some("协议连接未经确认，请重新打开桌面连接".into())
                             } else {
                                 guard.set_enabled(&thread_id, enabled, now()).err()
                             }
                         }
-                        ControlCommand::SetPaused { paused } => guard.set_paused(paused, now()).err(),
+                        ControlCommand::SetPaused { paused } => {
+                            if !paused && !installation_enabled {
+                                Some("此桌面接入已失效，不能恢复自动续跑".into())
+                            } else {
+                                guard.set_paused(paused, now()).err()
+                            }
+                        }
                         ControlCommand::RevokeAll => { guard.control_lost(now()); None }
                     };
                     let _ = control.reply.send(ControlResponse {
@@ -292,11 +420,12 @@ async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, Str
                     });
                 }
                 _ = timer.tick() => {
+                    let installation_enabled = installation_gate.enforce(&mut guard, now());
                     if last_control.is_some_and(|seen| seen.elapsed() > GUI_LEASE) && !lease_expired {
                         guard.control_lost(now());
                         lease_expired = true;
                     }
-                    if protocol_usable {
+                    if protocol_usable && installation_enabled {
                         for request in guard.tick(now()) {
                             let mut ownership = None;
                             if request.method == "turn/continueIfFailed" {
@@ -304,6 +433,11 @@ async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, Str
                                 let id = request.params["threadId"].as_str().unwrap_or_default();
                                 if !ownership_unambiguous(&directory, &generation, id) {
                                     guard.not_dispatched(request.id, now());
+                                    continue;
+                                }
+                                if !installation_gate.check() {
+                                    guard.not_dispatched(request.id, now());
+                                    guard.disconnected(now());
                                     continue;
                                 }
                             }
@@ -541,9 +675,7 @@ impl DesktopHub {
         Ok(true)
     }
 
-    pub async fn pause_all(&self, paused: bool) -> Result<(), String> {
-        // Commit the shared gate before contacting individual actors. A slow
-        // control response must not leave another bridge eligible to dispatch.
+    pub fn set_default_pause(&self, paused: bool) -> Result<(), String> {
         crate::store::Store::open(
             self.directory
                 .parent()
@@ -552,7 +684,13 @@ impl DesktopHub {
         )
         .map_err(|error| error.to_string())?
         .set_paused(paused)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+    }
+
+    pub async fn pause_all(&self, paused: bool) -> Result<(), String> {
+        // Commit the shared gate before contacting individual actors. A slow
+        // control response must not leave another bridge eligible to dispatch.
+        self.set_default_pause(paused)?;
         for (registration, _) in self.instances().await {
             control(&registration, ControlCommand::SetPaused { paused }).await?;
         }
@@ -745,6 +883,138 @@ impl OwnershipGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installed_gate(path: &Path, token: &str) -> InstallationGate {
+        InstallationGate::new(Some(path.as_os_str().into()), Some(token.into()))
+    }
+
+    #[test]
+    fn installation_gate_requires_both_variables_or_explicit_manual_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enabled");
+        private_file(&path, b"runtime-one").unwrap();
+        assert!(InstallationGate::new(None, None).check());
+        assert!(!InstallationGate::new(Some(path.as_os_str().into()), None).check());
+        assert!(!InstallationGate::new(None, Some("runtime-one".into())).check());
+        assert!(!installed_gate(Path::new("relative"), "runtime-one").check());
+        assert!(!installed_gate(&path, "").check());
+        assert!(!installed_gate(&path, &"x".repeat(129)).check());
+        assert!(installed_gate(&path, "runtime-one").check());
+        // Whitespace cannot turn a different file payload into authorization.
+        fs::write(&path, "runtime-one\n").unwrap();
+        assert!(!installed_gate(&path, "runtime-one").check());
+    }
+
+    #[test]
+    fn installation_revocation_never_revives_after_reenable_or_runtime_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enabled");
+        private_file(&path, b"runtime-one").unwrap();
+        let mut disabled = installed_gate(&path, "runtime-one");
+        assert!(disabled.check());
+        fs::remove_file(&path).unwrap();
+        assert!(!disabled.check());
+        private_file(&path, b"runtime-one").unwrap();
+        assert!(!disabled.check());
+
+        let mut upgraded = installed_gate(&path, "runtime-one");
+        assert!(upgraded.check());
+        fs::write(&path, "runtime-two").unwrap();
+        assert!(!upgraded.check());
+        assert!(installed_gate(&path, "runtime-two").check());
+        fs::write(&path, "runtime-one").unwrap();
+        assert!(!upgraded.check());
+    }
+
+    #[test]
+    fn invalid_installation_cannot_be_fixed_inside_an_already_started_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enabled");
+        let mut missing = installed_gate(&path, "runtime-one");
+        private_file(&path, b"runtime-one").unwrap();
+        assert!(!missing.check());
+        let mut current = installed_gate(&path, "runtime-one");
+        fs::write(&path, vec![b'x'; 129]).unwrap();
+        assert!(!current.check());
+        fs::write(&path, "runtime-one").unwrap();
+        assert!(!current.check());
+        assert!(!installed_gate(dir.path(), "runtime-one").check());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_gate_refuses_symlinks_public_files_and_non_utf8_tokens() {
+        use std::os::unix::{
+            ffi::OsStringExt,
+            fs::{symlink, PermissionsExt},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enabled");
+        let link = dir.path().join("link");
+        private_file(&path, b"runtime-one").unwrap();
+        symlink(&path, &link).unwrap();
+        assert!(!installed_gate(&link, "runtime-one").check());
+        assert!(!InstallationGate::new(
+            Some(path.as_os_str().into()),
+            Some(OsString::from_vec(vec![0xff]))
+        )
+        .check());
+        let mut current = installed_gate(&path, "runtime-one");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!current.check());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!current.check());
+    }
+
+    #[test]
+    fn installation_revocation_clears_consent_and_snapshot_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enabled");
+        private_file(&path, b"runtime-one").unwrap();
+        let mut gate = installed_gate(&path, "runtime-one");
+        let mut guard = DesktopGuard::open(&dir.path().join("state.sqlite")).unwrap();
+        guard.native_client(&json!({"method":"initialized","params":{}}), 100);
+        let request = guard.tick(100).pop().unwrap();
+        guard.reply(
+            request.id,
+            &json!({"result":{"version":1,"conditionalContinuation":true}}),
+            100,
+        );
+        guard.native_server(
+            &json!({"id":1,"result":{"thread":{
+                "id":"thread","name":"Test","cwd":"/test","turns":[]
+            }}}),
+            Some(&json!({"method":"thread/resume","params":{"threadId":"thread"}})),
+            100,
+        );
+        guard.set_enabled("thread", true, 100).unwrap();
+        assert!(gate.enforce(&mut guard, 100));
+        assert!(guard.snapshot()[0].enabled);
+        fs::remove_file(&path).unwrap();
+        assert!(!gate.enforce(&mut guard, 101));
+        let snapshot = guard.snapshot();
+        assert!(!snapshot[0].enabled);
+        assert!(!snapshot[0].can_enable);
+        assert!(guard.tick(101).is_empty());
+        private_file(&path, b"runtime-two").unwrap();
+        // Even a later native lifecycle event cannot restore this gate.
+        guard.native_client(&json!({"method":"initialized","params":{}}), 102);
+        assert!(!gate.enforce(&mut guard, 102));
+        assert!(guard.set_enabled("thread", true, 102).is_err());
+        assert!(guard.tick(102).is_empty());
+    }
+
+    #[test]
+    fn default_pause_is_durable_without_contacting_retired_actors() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = DesktopHub::new(dir.path());
+        hub.set_default_pause(true).unwrap();
+        let store = crate::store::Store::open(dir.path().join("desktop-state.sqlite")).unwrap();
+        assert!(store.is_paused().unwrap());
+        hub.set_default_pause(false).unwrap();
+        assert!(!store.is_paused().unwrap());
+        assert!(!dir.path().join("desktop-bridge").exists());
+    }
 
     #[test]
     fn ids_preserve_native_types_and_never_collide_with_internal_probes() {

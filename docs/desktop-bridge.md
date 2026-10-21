@@ -1,6 +1,6 @@
 # 原 Desktop 聊天续跑（实验）
 
-这条通路保留原 Codex Desktop、原聊天 ID、历史上下文与原客户端工具连接。用户不需要把聊天迁到终端。当前只提供 macOS 开发集成；不自动替换官方应用，不修改官方数据库、凭据或 rollout。
+这条实验通路旨在保留原 Codex Desktop、原聊天 ID、历史上下文与原客户端工具连接，不迁到终端。正常图标的一次性接入已编码，限定 macOS 默认 zsh 环境及 Desktop 构建 `20770`。**原 Desktop 实机与真实额度恢复尚未验收，新 Release 尚未发布。** 不替换官方应用，不修改官方数据库、凭据或 rollout。
 
 ## 组成
 
@@ -9,16 +9,34 @@
 - Rust 调度器在真实额度放行后调用这项条件操作，发送前保存不可重复的意图。未知协议或提交结果不明时停止，不退回普通 `turn/start`。
 - AutoResume 显示当前桥接中已打开的聊天，开关默认关闭。工具调用、权限审批和用户输入不会转移到 AutoResume 界面。
 
-## 构建和准备
+## 一次性接入（开发版本）
 
-以下操作只构建并生成待手动打开的启动器，不退出或启动用户的 Desktop：
+1. 在附有完整实验组件的 AutoResume 中打开 **连接 Codex → 正常启动接入 → 启用接入**。
+2. 首次设置后，正常退出 Codex，再从平时的 Dock / Applications 图标打开。以后无需专用启动器。
+3. 在原 Codex 中打开需要守护的聊天，再在 AutoResume 对该聊天单独开启续跑。接入安装不代表聊天已授权，也不代表已连接成功。
+
+接入在用户 `.zshrc` 中添加可移除的条件入口，仅在 Desktop 的 `CODEX_SHELL=1` 环境下生效；组件保存于 AutoResume 私有目录，不设置系统全局环境或登录服务。关闭接入仍使用同一设置入口；后续启动恢复官方 CLI。保留已有自定义 CLI 配置，冲突时拒绝启用。组件缺失、配置无效或 Desktop 版本变化时，在执行端启动前回退官方 CLI；已启动的执行端失败不会再启动第二个后端。
+
+已发布公共安装包未附完整执行端。当前源码遇到组件不完整会禁用入口。本地 debug 版本可使用下面生成的 `work/guarded-codex-build/bin/codex-app-server`；这不代表公开安装包已具备或通过桌面续跑验收。
+
+## 开发构建
+
+以下命令只构建组件，不退出或启动用户的 Desktop：
 
 ```sh
 npm ci
 npm run build
 cargo build --manifest-path src-tauri/Cargo.toml --bins
 node scripts/build-guarded-codex.mjs --test
+```
 
+运行本次构建的 debug 应用后，通过上述接入入口准备。修改版执行端的来源和许可证见[执行端补丁](../integrations/codex/README.md)。
+
+### 高级诊断：独立启动器
+
+旧独立脚本仅用于开发诊断，不是日常启动方式。它生成一个待手动运行的入口，不安装正常图标接入：
+
+```sh
 node scripts/prepare-desktop-bridge.mjs \
   --app /Applications/ChatGPT.app \
   --bridge "$PWD/src-tauri/target/debug/codex-autoresume-bridge" \
@@ -28,9 +46,9 @@ node scripts/prepare-desktop-bridge.mjs \
 
 `--app` 指向本机真实的 Codex Desktop 应用；目录名可能因安装版本不同而不同。输出目录必须尚不存在，避免覆盖正在使用的配置。准备脚本会校验路径与私有文件权限。
 
-原 Desktop 完全退出后，再手动打开生成的 `启动桌面续跑.command`；启动器不会强制结束已有进程。打开本次构建的 AutoResume，在原 Desktop 中进入需要守护的聊天，然后在 AutoResume 对该聊天单独开启续跑。新消息或停止会撤销这次许可，需要时重新开启。
+原 Desktop 完全退出后，才可手动打开生成的 `启动桌面续跑.command`；脚本不会强制结束已有进程。此诊断入口与普通图标接入分开，聊天仍需单独授权。
 
-恢复普通使用：完全退出实验连接中的 Desktop，再通过平时的图标打开原应用。没有修改官方程序，也没有设置全局环境变量或开机启动项。
+诊断结束后完全退出 Desktop；若曾启用正常图标接入，先在 AutoResume 中关闭接入，再从原图标启动即可使用官方执行端。
 
 ## 当前边界
 

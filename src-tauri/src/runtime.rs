@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-pub const COMPATIBILITY: &str = "原聊天尚未接入。请通过桌面续跑启动器重新打开 Codex，再在原窗口中打开需要守护的聊天。桌面连接目前为实验功能。";
+pub const COMPATIBILITY: &str = "原聊天尚未接入。请在连接设置中启用正常启动接入，再从平时的图标重开 Codex。接入后，每个聊天仍需单独开启续跑。桌面连接目前为实验功能。";
 const TAKEOVER_BLOCKED: &str = "此条目来自历史列表，仅监测；原聊天续跑需使用桌面连接";
 
 pub fn now() -> i64 {

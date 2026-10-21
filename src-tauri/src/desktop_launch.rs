@@ -192,6 +192,11 @@ pub fn run_wrapper() -> Result<i32, String> {
         std::env::current_exe().map_err(|error| format!("无法确认桥接程序路径：{error}"))?;
     let config = BridgeConfig::load(Path::new(&config_path), &wrapper)?;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // The persistent entry point checks configuration before selecting a backend.
+    // This branch never starts an App Server or touches a user's chat.
+    if args == [OsString::from("--autoresume-check-config")] {
+        return Ok(0);
+    }
     match classify(&args) {
         Invocation::Official => pass_through(&config, &args),
         Invocation::Guarded(args) => run_guarded(config, args),

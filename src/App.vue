@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import { call, demo, desktop, errorMessage, formatTime, projectName } from './api'
-import type { Candidate, Snapshot, TaskView } from './types'
+import type { Candidate, DesktopSetup, Snapshot, TaskView } from './types'
 import TaskCard from './components/TaskCard.vue'
 import TaskInspector from './components/TaskInspector.vue'
 import QuotaCard from './components/QuotaCard.vue'
@@ -27,6 +27,9 @@ const error = ref('')
 const busy = ref(new Set<string>())
 const candidatesDialog = ref<HTMLDialogElement | null>(null)
 const connectionDialog = ref<HTMLDialogElement | null>(null)
+const desktopSetup = ref<DesktopSetup | null>(null)
+const desktopSetupError = ref('')
+const desktopSetupBusy = computed(() => busy.value.has('get_desktop_setup') || busy.value.has('set_desktop_setup'))
 const capabilityDialog = ref<HTMLDialogElement | null>(null)
 const compactDetailDialog = ref<HTMLDialogElement | null>(null)
 const appearanceMenu = ref<HTMLDetailsElement | null>(null)
@@ -93,6 +96,40 @@ function restoreFocus(event: Event) {
   const dialog = event.target as HTMLDialogElement
   const opener = dialogOpeners.get(dialog)
   if (opener?.isConnected) opener.focus()
+}
+
+async function openConnection() {
+  showDialog(connectionDialog.value)
+  if (!desktop || desktopSetupBusy.value) return
+  busy.value.add('get_desktop_setup')
+  desktopSetupError.value = ''
+  try {
+    desktopSetup.value = await call<DesktopSetup>('get_desktop_setup')
+  } catch (cause) {
+    desktopSetup.value = null
+    desktopSetupError.value = errorMessage(cause)
+  } finally {
+    busy.value.delete('get_desktop_setup')
+  }
+}
+
+async function toggleDesktopSetup() {
+  const setup = desktopSetup.value
+  if (!desktop || desktopSetupBusy.value || !setup || (!setup.available && !setup.installed)) return
+  busy.value.add('set_desktop_setup')
+  desktopSetupError.value = ''
+  try {
+    desktopSetup.value = await call<DesktopSetup>('set_desktop_setup', { enabled: !setup.installed })
+    if (pendingRefresh) await pendingRefresh
+    await refresh()
+  } catch (cause) {
+    desktopSetupError.value = errorMessage(cause)
+    // Failed installation/removal may have changed its persistent state.
+    try { desktopSetup.value = await call<DesktopSetup>('get_desktop_setup') }
+    catch { desktopSetup.value = null }
+  } finally {
+    busy.value.delete('set_desktop_setup')
+  }
 }
 
 function refresh() {
@@ -264,7 +301,7 @@ onBeforeUnmount(() => {
     <header class="app-header" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region><img class="brand-icon" :src="appMark" alt=""/><h1 data-tauri-drag-region>{{ tray ? 'AutoResume' : 'Codex AutoResume' }}</h1><span v-if="tray" class="connection-dot" :class="snapshot.connection" :title="connectionLabel" :aria-label="connectionLabel"/></div>
       <div class="header-actions">
-        <button v-if="!tray" class="connection-button" :class="snapshot.connection" :aria-label="`查看连接状态：${connectionLabel}`" title="查看连接状态" @click="showDialog(connectionDialog)"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
+        <button v-if="!tray" class="connection-button" :class="snapshot.connection" :aria-label="`查看连接状态：${connectionLabel}`" title="查看连接状态" @click="openConnection"><span class="connection-dot" :class="snapshot.connection" aria-hidden="true"/>{{ connectionLabel }}</button>
         <button class="icon-button pause-button" :class="{ active: snapshot.pausedAll }" :aria-pressed="snapshot.pausedAll" :aria-label="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :title="snapshot.pausedAll ? '解除暂停' : '暂停全部'" :disabled="!snapshot.tasks.length || busy.has('set_paused')" @click="mutate('set_paused', { paused: !snapshot.pausedAll })">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path v-if="snapshot.pausedAll" d="m9 5 11 7-11 7Z"/><path v-else d="M9 5v14M15 5v14"/></svg>
         </button>
@@ -312,12 +349,19 @@ onBeforeUnmount(() => {
     </main>
     <footer v-if="tray" class="tray-footer">
       <button class="button secondary" :disabled="loading" @click="openCandidates">添加任务</button>
-      <div class="footer-actions"><button class="icon-button" aria-label="打开主窗口" title="打开主窗口" @click="openMain()"><img :src="expandIcon" alt=""/></button><button class="icon-button" aria-label="查看连接状态" title="查看连接状态" @click="showDialog(connectionDialog)"><img :src="settingsIcon" alt=""/></button></div>
+      <div class="footer-actions"><button class="icon-button" aria-label="打开主窗口" title="打开主窗口" @click="openMain()"><img :src="expandIcon" alt=""/></button><button class="icon-button" aria-label="查看连接状态" title="查看连接状态" @click="openConnection"><img :src="settingsIcon" alt=""/></button></div>
     </footer>
     <dialog ref="connectionDialog" class="dialog connection-dialog" aria-labelledby="connection-title" @close="restoreFocus">
       <div class="dialog-header"><h2 id="connection-title">连接 Codex</h2><button class="icon-button" aria-label="关闭连接状态" autofocus @click="connectionDialog?.close()"><img :src="closeIcon" alt=""/></button></div>
       <div class="connection-card"><img v-if="connected && !demo" :src="checkIcon" alt=""/><span v-else class="connection-dot" :class="snapshot.connection" aria-hidden="true"/><strong>{{ connectionLabel }}</strong><span v-if="snapshot.codexVersion" class="version-label">{{ snapshot.codexVersion }}</span></div>
       <div class="connection-message" :class="snapshot.connection"><h3 v-if="snapshot.connection === 'login_required'"><img :src="loginAlert" alt=""/>需要重新登录</h3><p>{{ snapshot.connectionMessage }}</p></div>
+      <section class="desktop-setup" aria-labelledby="desktop-setup-title" :aria-busy="desktopSetupBusy">
+        <div class="desktop-setup-heading"><h3 id="desktop-setup-title">正常启动接入</h3><span>实验组件</span></div>
+        <p>设置一次，之后从 Codex 原图标打开；每个聊天仍需单独开启续跑。</p>
+        <p v-if="desktopSetupError" class="dialog-error" role="alert">{{ desktopSetupError }}</p>
+        <p v-else class="desktop-setup-status" role="status">{{ !desktop ? '请在桌面应用中设置，预览不会修改本机。' : busy.has('get_desktop_setup') ? '正在检查接入组件…' : desktopSetup?.message }}</p>
+        <button class="button" :class="desktopSetup?.installed ? 'secondary' : 'primary'" :disabled="!desktop || desktopSetupBusy || !desktopSetup || (!desktopSetup.available && !desktopSetup.installed)" @click="toggleDesktopSetup">{{ busy.has('set_desktop_setup') ? '正在设置…' : desktopSetup?.installed ? '关闭接入' : '启用接入' }}</button>
+      </section>
       <details class="connection-details"><summary>诊断详情</summary><dl><div v-if="snapshot.accountLabel"><dt>账户</dt><dd>{{ snapshot.accountLabel }}</dd></div><div><dt>最近核对</dt><dd class="mono">{{ formatTime(lastChecked, true) }}</dd></div></dl></details>
       <p v-if="error" class="dialog-error" role="alert">{{ error }}</p>
       <div v-if="!demo" class="dialog-footer connection-actions">

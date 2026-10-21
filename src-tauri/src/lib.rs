@@ -1,6 +1,9 @@
+mod desktop_bootstrap;
 pub mod desktop_bridge;
 mod desktop_guard;
 pub mod desktop_launch;
+mod desktop_profile;
+mod desktop_setup;
 mod managed;
 mod protocol;
 mod quota;
@@ -19,6 +22,47 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 type Shared = Arc<AppState>;
+
+fn desktop_setup(app: &tauri::AppHandle) -> Result<desktop_setup::Setup, String> {
+    Ok(desktop_setup::Setup::new(
+        &app.path().app_data_dir().map_err(|_| "无法读取应用目录")?,
+        &app.path()
+            .resource_dir()
+            .map_err(|_| "无法读取运行组件目录")?,
+    ))
+}
+
+#[tauri::command]
+fn get_desktop_setup(app: tauri::AppHandle) -> Result<desktop_setup::SetupStatus, String> {
+    Ok(desktop_setup(&app)?.status())
+}
+
+#[tauri::command]
+async fn set_desktop_setup(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    enabled: bool,
+) -> Result<desktop_setup::SetupStatus, String> {
+    let setup = desktop_setup(&app)?;
+    if enabled {
+        let status = setup.install().await?;
+        // The installation generation invalidates older execution permission.
+        // Restore the user's visible pause preference for the next connection.
+        let paused = state.snapshot.read().await.paused_all;
+        if state.desktop.set_default_pause(paused).is_err() {
+            setup.disable()?;
+            return Err("无法保存续跑暂停状态，已撤销本次接入设置。".into());
+        }
+        Ok(status)
+    } else {
+        // A broken store or unreachable actor must not prevent removing the
+        // installation gate. Live bridges independently observe its removal.
+        let _ = state.desktop.set_default_pause(true);
+        let result = setup.disable();
+        state.desktop.revoke_all().await;
+        result
+    }
+}
 
 #[tauri::command]
 async fn get_snapshot(state: State<'_, Shared>) -> Result<Snapshot, String> {
@@ -194,6 +238,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_desktop_setup,
+            set_desktop_setup,
             list_candidates,
             add_task,
             set_task_enabled,

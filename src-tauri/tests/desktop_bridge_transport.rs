@@ -58,6 +58,11 @@ for line in sys.stdin:
         reply(message, {'version':1, 'conditionalContinuation':True})
     elif method == 'thread/resume':
         reply(message, {'thread':{'id':thread_id,'name':'Synthetic existing task','cwd':'/synthetic-project','turns':[]}})
+    elif method == 'thread/read':
+        if held_quota is not None:
+            reply(held_quota, quota())
+            held_quota = None
+        reply(message, {'thread':{'id':thread_id,'name':'Synthetic existing task','cwd':'/synthetic-project','turns':[]}})
     elif method == 'turn/start':
         text = message['params']['input'][0]['text']
         if text == 'NEW USER WORK':
@@ -100,10 +105,15 @@ struct Fixture {
     input: Option<ChildStdin>,
     output: Receiver<Value>,
     registration: Value,
+    enable_file: Option<PathBuf>,
 }
 
 impl Fixture {
     fn start(hold_quota: bool) -> Self {
+        Self::start_with_enable(hold_quota, None)
+    }
+
+    fn start_with_enable(hold_quota: bool, enable_token: Option<&str>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let data = directory.path().join("data");
         fs::create_dir(&data).unwrap();
@@ -128,21 +138,32 @@ impl Fixture {
         .unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let log = directory.path().join("backend.jsonl");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"));
+        command
             .arg("app-server")
             .arg("--listen")
             .arg("stdio://")
             .env("AUTORESUME_BRIDGE_CONFIG", &config)
             .env("AUTORESUME_TEST_BACKEND_LOG", &log)
+            .env_remove("AUTORESUME_DESKTOP_ENABLE_FILE")
+            .env_remove("AUTORESUME_DESKTOP_ENABLE_TOKEN")
             .env(
                 "AUTORESUME_TEST_HOLD_QUOTA",
                 if hold_quota { "1" } else { "0" },
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::inherit());
+        let enable_file = enable_token.map(|token| {
+            let path = directory.path().join("enabled");
+            fs::write(&path, token).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            command
+                .env("AUTORESUME_DESKTOP_ENABLE_FILE", &path)
+                .env("AUTORESUME_DESKTOP_ENABLE_TOKEN", token);
+            path
+        });
+        let mut child = command.spawn().unwrap();
         let input = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, output) = mpsc::channel();
@@ -187,6 +208,7 @@ impl Fixture {
             input: Some(input),
             output,
             registration,
+            enable_file,
         }
     }
 
@@ -236,6 +258,10 @@ impl Fixture {
     }
 
     fn connect_existing_and_fail(&mut self) {
+        self.connect_existing_and_fail_with_consent(false);
+    }
+
+    fn connect_existing_and_fail_with_consent(&mut self, before_failure: bool) {
         self.send(json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"original_desktop","version":"fixture"},"capabilities":{"experimentalApi":true}}}));
         self.receive_until(|value| value["id"] == 1);
         self.send(json!({"method":"initialized","params":{}}));
@@ -251,10 +277,19 @@ impl Fixture {
                 "tool":"original_desktop_tool","arguments":{"sample":"unchanged"}
             }})
         );
+        if before_failure {
+            self.enable_automatic();
+        }
         self.send(json!({"id":"native-tool-1","result":{"success":true,"contentItems":[{"type":"inputText","text":"native tool answer"}]}}));
         self.receive_until(|value| {
             value["method"] == "turn/completed" && value["params"]["turn"]["status"] == "failed"
         });
+        if !before_failure {
+            self.enable_automatic();
+        }
+    }
+
+    fn enable_automatic(&self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let snapshot = self.control(json!({"command":"snapshot"}));
@@ -272,6 +307,18 @@ impl Fixture {
         );
         assert!(result["error"].is_null(), "{result}");
         assert_eq!(result["tasks"][0]["enabled"], true);
+    }
+
+    fn wait_for_quota_preflight(&self) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !self
+            .requests()
+            .iter()
+            .any(|value| value["method"] == "account/rateLimits/read")
+        {
+            assert!(Instant::now() < deadline, "quota preflight was not sent");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn requests(&self) -> Vec<Value> {
@@ -324,6 +371,70 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn configuration_preflight_never_launches_backends_or_registers_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    let official = directory.path().join("synthetic-official");
+    let guarded = directory.path().join("synthetic-guarded");
+    let marker = directory.path().join("unexpected-backend-start");
+    // Either routing mistake leaves evidence, even if the backend exits before
+    // it receives any stdin. These executables have no Codex/model behavior.
+    for path in [&official, &guarded] {
+        fs::write(
+            path,
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$AUTORESUME_TEST_START_MARKER\"\nexit 97\n",
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let valid = json!({"officialCli":official,"guardedAppServer":guarded,"dataDir":data});
+    let mut unknown = valid.clone();
+    unknown["unknownConfiguration"] = json!(true);
+    let mut invalid = valid.clone();
+    invalid["guardedAppServer"] = json!(directory.path().join("missing-backend"));
+    let config = directory.path().join("config.json");
+    for (label, bytes, should_succeed) in [
+        ("valid", serde_json::to_vec(&valid).unwrap(), true),
+        ("malformed JSON", b"{".to_vec(), false),
+        (
+            "unknown field",
+            serde_json::to_vec(&unknown).unwrap(),
+            false,
+        ),
+        ("invalid path", serde_json::to_vec(&invalid).unwrap(), false),
+    ] {
+        fs::write(&config, bytes).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_codex-autoresume-bridge"))
+            .arg("--autoresume-check-config")
+            .env_clear()
+            .env("AUTORESUME_BRIDGE_CONFIG", &config)
+            .env("AUTORESUME_TEST_START_MARKER", &marker)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            should_succeed,
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label}: unexpected protocol output"
+        );
+        assert!(!marker.exists(), "{label}: preflight started a backend");
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "{label}: preflight created runtime state or a connection registration"
+        );
+    }
+}
+
+#[test]
 fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
     let mut fixture = Fixture::start(false);
     fixture.connect_existing_and_fail();
@@ -368,15 +479,7 @@ fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
 fn new_native_input_cancels_a_held_quota_preflight_before_any_continuation() {
     let mut fixture = Fixture::start(true);
     fixture.connect_existing_and_fail();
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while !fixture
-        .requests()
-        .iter()
-        .any(|value| value["method"] == "account/rateLimits/read")
-    {
-        assert!(Instant::now() < deadline, "quota preflight was not sent");
-        thread::sleep(Duration::from_millis(20));
-    }
+    fixture.wait_for_quota_preflight();
     fixture.send(
         json!({"id":"new-user-input","method":"turn/start","params":{
             "threadId":"original-desktop-chat","input":[{"type":"text","text":"NEW USER WORK"}]
@@ -389,6 +492,51 @@ fn new_native_input_cancels_a_held_quota_preflight_before_any_continuation() {
     thread::sleep(Duration::from_millis(2200));
     let snapshot = fixture.control(json!({"command":"snapshot"}));
     assert_eq!(snapshot["tasks"][0]["enabled"], false);
+    assert!(!fixture
+        .requests()
+        .iter()
+        .any(|value| value["method"] == "turn/continueIfFailed"));
+    fixture.finish();
+}
+
+#[test]
+fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
+    let original_token = "synthetic-installation-v1";
+    let mut fixture = Fixture::start_with_enable(true, Some(original_token));
+    fixture.connect_existing_and_fail_with_consent(true);
+    fixture.wait_for_quota_preflight();
+    let enable_file = fixture.enable_file.clone().unwrap();
+    fs::remove_file(&enable_file).unwrap();
+    // Snapshot checks the installation gate, without sending any native input
+    // which would independently revoke the task's consent and mask a gate bug.
+    let disabled = fixture.control(json!({"command":"snapshot"}));
+    assert_eq!(disabled["tasks"][0]["enabled"], false);
+    assert_eq!(disabled["tasks"][0]["canEnable"], false);
+
+    for (index, token) in ["synthetic-installation-v2", original_token]
+        .into_iter()
+        .enumerate()
+    {
+        fs::write(&enable_file, token).unwrap();
+        fs::set_permissions(&enable_file, fs::Permissions::from_mode(0o600)).unwrap();
+        let denied = fixture.control(json!({
+            "command":"set_enabled","thread_id":"original-desktop-chat","enabled":true
+        }));
+        assert!(denied["error"].is_string());
+        assert_eq!(denied["tasks"][0]["canEnable"], false);
+        // This harmless read releases the held successful quota response and
+        // proves original Desktop traffic still works after retirement.
+        let id = format!("native-read-after-retirement-{index}");
+        fixture.send(json!({"id":id,"method":"thread/read","params":{
+            "threadId":"original-desktop-chat"
+        }}));
+        let response = fixture.receive_until(|value| value["id"] == id);
+        assert_eq!(response["result"]["thread"]["id"], "original-desktop-chat");
+    }
+    thread::sleep(Duration::from_millis(2200));
+    let snapshot = fixture.control(json!({"command":"snapshot"}));
+    assert_eq!(snapshot["tasks"][0]["enabled"], false);
+    assert_eq!(snapshot["tasks"][0]["canEnable"], false);
     assert!(!fixture
         .requests()
         .iter()
