@@ -241,7 +241,8 @@ jobs:
               throw error;
             }
           }
-          if (get(`repos/${repo}/releases/tags/${tag}`)) throw new Error('This release already exists; it will not be overwritten');
+          const releases = JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp', `repos/${repo}/releases?per_page=100`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).flat();
+          if (releases.some(release => release.tag_name === tag)) throw new Error('This release already exists; it will not be overwritten');
           if (get(`repos/${repo}/git/ref/tags/${tag}`) && get(`repos/${repo}/commits/${tag}`)?.sha !== sha) throw new Error('The existing tag points to another commit');
           JS
       - name: Publish only after all installers pass
@@ -251,6 +252,7 @@ jobs:
             --target "$GITHUB_SHA" --draft --prerelease \
             --title "Codex AutoResume ${RELEASE_TAG} · Alpha" \
             --notes-file "docs/releases/${RELEASE_TAG}.md"
-          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          test "$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
           test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"

@@ -17,10 +17,33 @@ establish that the current working tree is release-ready.
   architectures, provenance, byte-for-byte resource matches, backend `--help`
   and strict signature verification passed. A wrong-architecture input was
   correctly refused. No server, account or model call was made by these checks.
-- Workflow syntax, release-version consistency and release notes were checked.
-  The workflow creates the release only after both backend test jobs and all
-  three installer checks pass. Cloud packaging and public-download verification
-  for this revision are pending; the local debug bundle is not the release DMG.
+- [Release build 39565319313](https://github.com/Wu-Zzz/Codex-AutoResume/actions/runs/39565319313)
+  built commit `911d3ebf36429061dfd21978af83d50a129987fc` on native runners.
+  Both modified Mac backends passed all eight isolated tests. Each installer job
+  passed 15 frontend tests, type checking, production frontend build, Rust fmt
+  and Clippy. Both Mac jobs passed 190 Rust unit tests and six synthetic transport
+  tests; Windows passed its 163 platform-applicable Rust tests.
+- Both release DMGs passed runtime architecture, executable permission,
+  provenance/resource hash, backend `--help`, strict ad-hoc signature and image
+  verification. The Windows NSIS installer passed silent installation and the
+  installed executable existence check; this is not a Windows GUI acceptance test.
+- All six metadata/backend/package jobs succeeded. The final publication job
+  created a complete draft, then failed because it tried to resolve the new tag
+  before publication (GitHub HTTP 422). The draft's exact source commit and four
+  uploaded assets were checked, all three installers were downloaded and their
+  SHA-256 checksums verified, and both DMGs were mounted read-only to independently
+  recheck signatures, architecture, runtime provenance and license files.
+- The verified draft was published as
+  [v0.2.0-alpha.1](https://github.com/Wu-Zzz/Codex-AutoResume/releases/tag/v0.2.0-alpha.1).
+  The published tag resolves to the source commit above; unauthenticated requests
+  confirmed all four public download links return HTTP 200 with expected sizes.
+  The workflow now checks
+  draft provenance before publication and resolves the tag afterward; its overall
+  original run remains failed at that publication-only step. A redundant build
+  triggered by publishing the tag was canceled without changing the release.
+- These checks did not start a real account server or submit a model turn. Real
+  quota interruption/recovery, Intel Mac GUI and Windows GUI acceptance remain
+  unverified.
 
 ## Native initialization handshake — 2026-10-21
 

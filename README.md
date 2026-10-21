@@ -51,7 +51,7 @@ Mac 打开 DMG 后拖入 Applications；Windows 运行 EXE 安装。[SHA-256 校
 
 本地通过 190 项 Rust 单元测试、6 项模拟连接测试、15 项前端测试及静态检查。Mac Apple Silicon 已验证一次普通终端任务执行，以及正常图标连接原 Desktop 聊天、续跑开关可用。
 
-发布流程检查两个 Mac 安装包及 Windows 安装包。**真实额度恢复、Intel Mac / Windows 实机交互尚未验收**；模拟测试和云端构建不能代替这些验证。详见[验证记录](docs/VALIDATION.md)和[实验连接说明](docs/desktop-bridge.md)。
+本次云端构建与三个安装包检查均已通过，下载文件的 SHA-256 也已复核。**真实额度恢复、Intel Mac / Windows 实机交互尚未验收**；模拟测试和云端构建不能代替这些验证。详见[验证记录](docs/VALIDATION.md)和[实验连接说明](docs/desktop-bridge.md)。
 
 ## 开发
 
