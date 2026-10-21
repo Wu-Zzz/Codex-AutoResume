@@ -650,6 +650,7 @@ fn installed_preflight_requires_current_executable_official_helper_link() {
 #[test]
 fn original_chat_continues_once_and_native_tools_and_response_ids_survive() {
     let mut fixture = Fixture::start(false);
+    assert!(fixture.control(json!({"command":"snapshot"}))["installationActive"].is_null());
     fixture.connect_existing_and_fail();
     fixture.receive_until(|value| {
         value["method"] == "turn/completed"
@@ -716,6 +717,10 @@ fn new_native_input_cancels_a_held_quota_preflight_before_any_continuation() {
 fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
     let original_token = "synthetic-installation-v1";
     let mut fixture = Fixture::start_with_enable(true, Some(original_token));
+    assert_eq!(
+        fixture.control(json!({"command":"snapshot"}))["installationActive"],
+        true
+    );
     fixture.connect_existing_and_fail_with_consent(true);
     fixture.wait_for_quota_preflight();
     let enable_file = fixture.enable_file.clone().unwrap();
@@ -723,6 +728,7 @@ fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
     // Snapshot checks the installation gate, without sending any native input
     // which would independently revoke the task's consent and mask a gate bug.
     let disabled = fixture.control(json!({"command":"snapshot"}));
+    assert_eq!(disabled["installationActive"], false);
     assert_eq!(disabled["tasks"][0]["enabled"], false);
     assert_eq!(disabled["tasks"][0]["canEnable"], false);
 
@@ -736,6 +742,7 @@ fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
             "command":"set_enabled","thread_id":"original-desktop-chat","enabled":true
         }));
         assert!(denied["error"].is_string());
+        assert_eq!(denied["installationActive"], false);
         assert_eq!(denied["tasks"][0]["canEnable"], false);
         // This harmless read releases the held successful quota response and
         // proves original Desktop traffic still works after retirement.
@@ -748,6 +755,7 @@ fn disabling_an_installation_permanently_retires_its_live_wrapper_generation() {
     }
     thread::sleep(Duration::from_millis(2200));
     let snapshot = fixture.control(json!({"command":"snapshot"}));
+    assert_eq!(snapshot["installationActive"], false);
     assert_eq!(snapshot["tasks"][0]["enabled"], false);
     assert_eq!(snapshot["tasks"][0]["canEnable"], false);
     assert!(!fixture

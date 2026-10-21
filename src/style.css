@@ -71,7 +71,7 @@
 body { margin: 0; min-width: 320px; }
 button, input { font: inherit; }
 button, a, input { -webkit-tap-highlight-color: transparent; }
-button { color: inherit; cursor: pointer; }
+button { appearance: none; color: inherit; cursor: pointer; }
 button:disabled { cursor: default; opacity: .45; }
 button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 3px; }
 button, a { touch-action: manipulation; }

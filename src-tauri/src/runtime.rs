@@ -35,6 +35,7 @@ pub struct Snapshot {
     pub account_label: Option<String>,
     pub compatibility_message: Option<String>,
     pub desktop_connected: bool,
+    pub desktop_restart_required: bool,
     pub paused_all: bool,
     pub checked_at: Option<i64>,
     pub quota: Option<QuotaTelemetry>,
@@ -50,6 +51,7 @@ impl Default for Snapshot {
             account_label: None,
             compatibility_message: Some(COMPATIBILITY.into()),
             desktop_connected: false,
+            desktop_restart_required: false,
             paused_all: false,
             checked_at: None,
             quota: None,
@@ -158,6 +160,7 @@ impl AppState {
             }));
         let desktop = self.desktop.snapshot().await;
         snapshot.desktop_connected = desktop.connected;
+        snapshot.desktop_restart_required = desktop.restart_required;
         if desktop.connected {
             snapshot.connection = "ready".into();
             snapshot.connection_message = "已连接 Codex 原聊天。".into();

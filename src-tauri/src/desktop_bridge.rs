@@ -96,6 +96,14 @@ impl InstallationGate {
             false
         }
     }
+
+    fn installation_active(&self) -> Option<bool> {
+        match self {
+            Self::Manual => None,
+            Self::Enabled { .. } => Some(true),
+            Self::Revoked => Some(false),
+        }
+    }
 }
 
 fn enable_token_matches(path: &Path, token: &str) -> bool {
@@ -179,6 +187,8 @@ struct ControlRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ControlResponse {
     generation: String,
+    #[serde(default)]
+    installation_active: Option<bool>,
     tasks: Vec<TaskView>,
     quota: Option<crate::quota::QuotaTelemetry>,
     error: Option<String>,
@@ -417,7 +427,8 @@ async fn run_async(config: BridgeConfig, args: Vec<OsString>) -> Result<i32, Str
                         ControlCommand::RevokeAll => { guard.control_lost(now()); None }
                     };
                     let _ = control.reply.send(ControlResponse {
-                        generation: generation.clone(), tasks: guard.snapshot(), quota: guard.telemetry(), error,
+                        generation: generation.clone(), installation_active: installation_gate.installation_active(),
+                        tasks: guard.snapshot(), quota: guard.telemetry(), error,
                     });
                 }
                 _ = timer.tick() => {
@@ -539,6 +550,7 @@ pub struct DesktopHub {
 
 pub struct DesktopSnapshot {
     pub connected: bool,
+    pub restart_required: bool,
     pub tasks: Vec<TaskView>,
     pub quota: Option<crate::quota::QuotaTelemetry>,
 }
@@ -599,6 +611,10 @@ impl DesktopHub {
     pub async fn snapshot(&self) -> DesktopSnapshot {
         let instances = self.instances().await;
         let connected = !instances.is_empty();
+        let restart_required = self.installation_enabled()
+            && instances
+                .iter()
+                .any(|(_, response)| response.installation_active != Some(true));
         let mut counts = HashMap::new();
         for (_, response) in &instances {
             for task in &response.tasks {
@@ -636,9 +652,38 @@ impl DesktopHub {
         views.sort_by(|a, b| a.id.cmp(&b.id));
         DesktopSnapshot {
             connected,
+            restart_required,
             tasks: views,
             quota,
         }
+    }
+
+    fn installation_enabled(&self) -> bool {
+        let Some(data) = self.directory.parent() else {
+            return false;
+        };
+        let path = data.join("desktop-integration/enabled");
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if !private_enable_file(&metadata) || metadata.len() == 0 {
+            return false;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            return false;
+        };
+        let mut token = String::new();
+        if std::io::Read::read_to_string(
+            &mut std::io::Read::take(file, MAX_ENABLE_TOKEN_BYTES + 1),
+            &mut token,
+        )
+        .is_err()
+            || token.is_empty()
+            || token.chars().any(char::is_control)
+        {
+            return false;
+        }
+        enable_token_matches(&path, &token)
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, String> {
@@ -894,7 +939,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("enabled");
         private_file(&path, b"runtime-one").unwrap();
-        assert!(InstallationGate::new(None, None).check());
+        let mut manual = InstallationGate::new(None, None);
+        assert!(manual.check());
+        assert_eq!(manual.installation_active(), None);
         assert!(!InstallationGate::new(Some(path.as_os_str().into()), None).check());
         assert!(!InstallationGate::new(None, Some("runtime-one".into())).check());
         assert!(!installed_gate(Path::new("relative"), "runtime-one").check());
@@ -913,8 +960,10 @@ mod tests {
         private_file(&path, b"runtime-one").unwrap();
         let mut disabled = installed_gate(&path, "runtime-one");
         assert!(disabled.check());
+        assert_eq!(disabled.installation_active(), Some(true));
         fs::remove_file(&path).unwrap();
         assert!(!disabled.check());
+        assert_eq!(disabled.installation_active(), Some(false));
         private_file(&path, b"runtime-one").unwrap();
         assert!(!disabled.check());
 
@@ -1092,6 +1141,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn installed_restart_state_distinguishes_live_retired_and_legacy_connections() {
+        for (installed, states, expected) in [
+            (false, vec![None], false),
+            (false, vec![Some(false)], false),
+            (true, vec![], false),
+            (true, vec![Some(true)], false),
+            (true, vec![Some(true), Some(true)], false),
+            (true, vec![None], true),
+            (true, vec![Some(false)], true),
+            (true, vec![Some(true), None], true),
+            (true, vec![Some(true), Some(false)], true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let hub = DesktopHub::new(directory.path());
+            fs::create_dir(&hub.directory).unwrap();
+            if installed {
+                let installation = directory.path().join("desktop-integration");
+                fs::create_dir(&installation).unwrap();
+                private_file(&installation.join("enabled"), b"runtime-current").unwrap();
+            }
+            let mut responders = Vec::new();
+            for (index, state) in states.iter().enumerate() {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let registration = Registration {
+                    version: 1,
+                    generation: Uuid::new_v4().to_string(),
+                    port: listener.local_addr().unwrap().port(),
+                    secret: "a".repeat(64),
+                    thread_ids: vec![],
+                };
+                private_file(
+                    &hub.directory.join(format!("{index}.json")),
+                    &serde_json::to_vec(&registration).unwrap(),
+                )
+                .unwrap();
+                let state = *state;
+                responders.push(tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: ControlRequest = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request.secret, registration.secret);
+                    assert_eq!(request.generation, registration.generation);
+                    assert!(matches!(request.command, ControlCommand::Snapshot));
+                    let mut response = json!({
+                        "generation":registration.generation,"tasks":[],"quota":null,"error":null
+                    });
+                    if let Some(active) = state {
+                        response["installationActive"] = json!(active);
+                    }
+                    // Omit the field entirely for the old wire protocol.
+                    write_message(stream.get_mut(), &response).await.unwrap();
+                }));
+            }
+            let snapshot = hub.snapshot().await;
+            assert_eq!(snapshot.connected, !states.is_empty());
+            assert_eq!(
+                snapshot.restart_required, expected,
+                "installed={installed}, states={states:?}"
+            );
+            for responder in responders {
+                responder.await.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_control_response_defaults_only_the_known_installation_field() {
+        let legacy = json!({"generation":"g","tasks":[],"quota":null,"error":null});
+        let parsed: ControlResponse = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(parsed.installation_active, None);
+        let mut unknown = legacy.clone();
+        unknown["futureInstallationField"] = json!(true);
+        assert!(serde_json::from_value::<ControlResponse>(unknown).is_err());
+        let mut mistyped = legacy;
+        mistyped["installationActive"] = json!("true");
+        assert!(serde_json::from_value::<ControlResponse>(mistyped).is_err());
+    }
+
+    #[tokio::test]
     async fn authenticated_control_roundtrips_and_checks_generation() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let registration = Registration {
@@ -1113,6 +1243,7 @@ mod tests {
                 .reply
                 .send(ControlResponse {
                     generation,
+                    installation_active: Some(true),
                     tasks: vec![],
                     quota: None,
                     error: None,
@@ -1220,6 +1351,7 @@ mod tests {
                 .reply
                 .send(ControlResponse {
                     generation,
+                    installation_active: None,
                     tasks: vec![],
                     quota: None,
                     error: None,

@@ -7,6 +7,7 @@ export const demo = !desktop && new URLSearchParams(window.location.search).get(
 const previewSnapshot: Snapshot = {
   connection: 'ready',
   desktopConnected: false,
+  desktopRestartRequired: false,
   connectionMessage: '界面预览 · 未连接真实 Codex',
   codexVersion: '预览',
   accountLabel: null,
@@ -71,6 +72,7 @@ export async function call<T>(command: string, args?: Record<string, unknown>): 
   if (command === 'get_snapshot') return {
     connection: 'missing', connectionMessage: '请在桌面应用中连接本机 Codex。',
     desktopConnected: false,
+    desktopRestartRequired: false,
     codexVersion: null, accountLabel: null, compatibilityMessage: null, pausedAll: false, tasks: [],
   } as T
   throw new Error('浏览器无法连接本机 Codex，请打开桌面应用。')

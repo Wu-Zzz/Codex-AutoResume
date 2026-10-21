@@ -39,10 +39,18 @@ establish that the current working tree is release-ready.
 - Connection text now uses plain Chinese, distinguishes connection from the
   ability to enable continuation, avoids repeating restart instructions after
   connection, and checks the installation again when the user clicks recheck.
-- Revised application checks passed: frontend type checking and 15 tests;
-  178 Rust unit tests and 6 wrapper/fake-backend process tests. The installation
+- Revised application checks passed: frontend type checking, production build
+  and 15 tests; 180 Rust unit tests, 6 wrapper/fake-backend process tests,
+  formatting and Clippy. The installation
   status tests remove or replace helpers, damage configuration, change the token
   and simulate a Desktop upgrade, while preserving the ability to turn it off.
+- Installation status now distinguishes the current runtime from retired, old
+  protocol and manually launched connections. An old connection remaining online
+  after an update cannot hide the need to restart Codex. Missing old fields stay
+  backward compatible; unknown fields and invalid types are still rejected.
+- The newly compiled backend and the official CLI produced identical stdout,
+  stderr and successful exit codes for an isolated `sandbox --help` probe. This
+  is a helper compatibility check, not a model request or sandbox execution test.
 - Desktop voice remains unsupported by the modified runtime: official voice
   components require a matching package layout and build identity. No build
   identity was spoofed. This limitation is shown in connection details.

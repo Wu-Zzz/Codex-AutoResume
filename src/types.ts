@@ -37,6 +37,7 @@ export interface QuotaTelemetry {
 export interface Snapshot {
   connection: 'checking' | 'ready' | 'missing' | 'error' | 'login_required'
   desktopConnected: boolean
+  desktopRestartRequired: boolean
   connectionMessage: string
   codexVersion: string | null
   accountLabel: string | null

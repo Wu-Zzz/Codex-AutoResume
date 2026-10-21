@@ -20,6 +20,7 @@ const tray = new URLSearchParams(window.location.search).get('view') === 'tray'
 const snapshot = ref<Snapshot>({
   connection: 'checking', connectionMessage: '正在检查本机 Codex…', codexVersion: null,
   desktopConnected: false,
+  desktopRestartRequired: false,
   accountLabel: null, compatibilityMessage: null, pausedAll: false, tasks: [],
 })
 const loading = ref(true)
@@ -74,6 +75,7 @@ const desktopSetupNote = computed(() => {
   if (busy.value.has('get_desktop_setup')) return '正在检查…'
   if (!desktopSetup.value) return ''
   if (!desktopSetup.value.available || !desktopSetup.value.installed) return desktopSetup.value.message
+  if (snapshot.value.desktopRestartRequired) return '设置已更新，请退出并重新打开 Codex。'
   return desktopChatsConnected.value ? '' : '已开启。请退出并重新打开 Codex。'
 })
 const capabilityLabel = computed(() => {
@@ -376,7 +378,7 @@ onBeforeUnmount(() => {
         <div class="desktop-setup-heading"><h3 id="desktop-setup-title">自动连接 Codex</h3><span>测试功能</span></div>
         <p>开启后，照常打开 Codex 就能连接，无需其他启动步骤。</p>
         <p v-if="desktopSetupError" class="dialog-error" role="alert">{{ desktopSetupError }}</p>
-        <p v-else-if="desktopSetupNote" class="desktop-setup-status" role="status">{{ desktopSetupNote }}</p>
+        <p v-else-if="desktopSetupNote" class="desktop-setup-status" :class="{ 'dialog-error': desktopSetup && !desktopSetup.available }" role="status">{{ desktopSetupNote }}</p>
         <button class="button" :class="desktopSetup?.installed ? 'secondary' : 'primary'" :disabled="!desktop || desktopSetupBusy || !desktopSetup || (!desktopSetup.available && !desktopSetup.installed)" @click="toggleDesktopSetup">{{ busy.has('set_desktop_setup') ? '正在设置…' : desktopSetup?.installed ? '关闭自动连接' : '开启自动连接' }}</button>
       </section>
       <details class="connection-details"><summary>连接详情</summary><p>原聊天续跑使用修改版 Codex 执行程序，目前仍在测试，暂不支持语音功能。</p><dl><div v-if="snapshot.codexVersion"><dt>Codex 版本</dt><dd>{{ snapshot.codexVersion }}</dd></div><div v-if="snapshot.accountLabel"><dt>账户</dt><dd>{{ snapshot.accountLabel }}</dd></div><div><dt>上次检查</dt><dd class="mono">{{ formatTime(lastChecked, true) }}</dd></div></dl></details>
