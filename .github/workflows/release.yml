@@ -250,7 +250,7 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" work/release-assets/* \
             --target "$GITHUB_SHA" --draft --prerelease \
-            --title "Codex AutoResume ${RELEASE_TAG} · Alpha" \
+            --title "$RELEASE_TAG" \
             --notes-file "docs/releases/${RELEASE_TAG}.md"
           test "$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
           test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4

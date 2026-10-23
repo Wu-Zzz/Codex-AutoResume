@@ -1,5 +1,7 @@
 # Codex AutoResume
 
+简体中文 | [English](README.en.md)
+
 一个轻量的 macOS 菜单栏 / Windows 托盘工具：任务因 Codex 额度耗尽而中断时，等待额度恢复，再继续执行。
 
 **当前为 Alpha。Mac 原聊天续跑是实验功能：已验证正常图标启动、原聊天连接和续跑开关，真实额度耗尽后的自动恢复仍待实测。**
