@@ -1,4 +1,4 @@
-name: Package desktop prerelease
+name: Package desktop alpha
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the prerelease after all checks pass
+        description: Publish the alpha as Latest after all checks pass
         type: boolean
         default: false
 
@@ -198,7 +198,7 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish verified prerelease
+    name: Publish alpha as Latest
     if: github.ref_type == 'tag' || inputs.publish == true
     needs: [metadata, package]
     runs-on: ubuntu-latest
@@ -249,10 +249,12 @@ jobs:
         shell: bash
         run: |
           gh release create "$RELEASE_TAG" work/release-assets/* \
-            --target "$GITHUB_SHA" --draft --prerelease \
+            --target "$GITHUB_SHA" --draft \
             --title "$RELEASE_TAG" \
             --notes-file "docs/releases/${RELEASE_TAG}.md"
           test "$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
           test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 4
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          # GitHub Latest excludes prereleases; Alpha remains in the version and release notes.
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
           test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)" = "$RELEASE_TAG"
